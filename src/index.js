@@ -6,7 +6,7 @@ import cors from 'cors';
 const app = express();
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000'],
+  origin: ['https://music-bingo-swart.vercel.app/', 'http://localhost:5173'],
   methods: ['GET', 'POST'],
   credentials: true
 }));
@@ -15,7 +15,7 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin: ['http://localhost:5173', 'http://localhost:3000'],
+    origin: ['https://music-bingo-swart.vercel.app/', 'http://localhost:5173'],
     methods: ['GET', 'POST'],
     credentials: true,
     allowedHeaders: ['*']
@@ -264,7 +264,7 @@ setInterval(() => {
   }
 }, 300000); // Cada 5 minutos
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
   console.log(`Servidor escuchando en puerto ${PORT}`);
 });
