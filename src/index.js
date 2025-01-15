@@ -58,24 +58,26 @@ io.on('connection', (socket) => {
   socket.on('createRoom', async (config) => {
     try {
       const roomCode = config.roomCode || Math.random().toString(36).substring(2, 8).toUpperCase();
-
+      
       const roomData = {
         host: socket.id,
         players: [{
           id: socket.id,
           name: 'Game Master',
-          isHost: true
+          isHost: true,
+          ready: true
         }],
         config,
         currentCategory: null,
         phase: 'waiting',
-        createdAt: new Date()
+        createdAt: new Date(),
+        gameState: null
       };
 
       gameRooms.set(roomCode, roomData);
       await socket.join(roomCode);
 
-      socket.emit('roomCreated', {
+      socket.emit('roomCreated', { 
         roomCode,
         players: roomData.players,
         config
@@ -95,25 +97,29 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', async ({ roomCode, name, ...playerInfo }) => {
     try {
       console.log(`Intento de unirse a sala ${roomCode} por ${socket.id}`, { name, playerInfo });
-
+      
       const room = gameRooms.get(roomCode);
-
+      
       if (!room) {
         socket.emit('error', { message: 'Sala no encontrada' });
         return;
       }
 
-      const existingPlayerIndex = room.players.findIndex(p =>
+      const existingPlayerIndex = room.players.findIndex(p => 
         p.name === name || p.id === socket.id
       );
 
+      let isReconnecting = false;
+
       if (existingPlayerIndex !== -1) {
+        isReconnecting = true;
         room.players[existingPlayerIndex] = {
           ...room.players[existingPlayerIndex],
           id: socket.id,
           name,
           ...playerInfo,
-          reconnected: true
+          reconnected: true,
+          ready: room.phase === 'playing'
         };
       } else {
         room.players.push({
@@ -121,6 +127,7 @@ io.on('connection', (socket) => {
           name,
           isHost: false,
           joinedAt: new Date(),
+          ready: false,
           ...playerInfo
         });
       }
@@ -132,17 +139,40 @@ io.on('connection', (socket) => {
         players: room.players,
         config: room.config,
         phase: room.phase,
-        currentCategory: room.currentCategory
+        currentCategory: room.currentCategory,
+        gameState: room.gameState,
+        isReconnecting
       });
 
       io.to(roomCode).emit('playersUpdate', {
         players: room.players
       });
 
-      console.log(`Jugador ${name} unido a sala ${roomCode}`);
+      console.log(`Jugador ${name} ${isReconnecting ? 'reconectado' : 'unido'} a sala ${roomCode}`);
     } catch (error) {
       console.error('Error al unirse a sala:', error);
       socket.emit('error', { message: 'Error al unirse a la sala' });
+    }
+  });
+
+  socket.on('playerReady', ({ roomCode }) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room) {
+        socket.emit('error', { message: 'Sala no encontrada' });
+        return;
+      }
+
+      const player = room.players.find(p => p.id === socket.id);
+      if (player) {
+        player.ready = true;
+        io.to(roomCode).emit('playersUpdate', {
+          players: room.players
+        });
+      }
+    } catch (error) {
+      console.error('Error al marcar jugador como listo:', error);
+      socket.emit('error', { message: 'Error al actualizar estado del jugador' });
     }
   });
 
@@ -154,13 +184,50 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // Verificar que todos los jugadores estén ready
+      const allPlayersReady = room.players.every(player => player.ready);
+      if (!allPlayersReady) {
+        socket.emit('error', { message: 'No todos los jugadores están listos' });
+        return;
+      }
+
       room.phase = 'playing';
       room.config.difficulty = difficulty;
-
-      io.to(roomCode).emit('gameStarted', {
+      room.gameState = {
         difficulty,
-        players: room.players
+        startedAt: new Date(),
+        currentRound: 0
+      };
+
+      // Confirmar con cada jugador y esperar sus respuestas
+      const playerPromises = room.players.map(player => {
+        return new Promise((resolve) => {
+          if (player.isHost) return resolve(true);
+          
+          io.to(player.id).emit('gameStarting');
+          
+          // Timeout para cada jugador
+          setTimeout(() => resolve(false), 5000);
+        });
       });
+
+      Promise.all(playerPromises).then(results => {
+        const allConfirmed = results.every(r => r);
+        if (allConfirmed) {
+          io.to(roomCode).emit('gameStarted', {
+            difficulty,
+            players: room.players,
+            gameState: room.gameState
+          });
+        } else {
+          // Algunos jugadores no confirmaron
+          room.phase = 'waiting';
+          io.to(roomCode).emit('gameStartFailed', {
+            message: 'No todos los jugadores pudieron unirse'
+          });
+        }
+      });
+
     } catch (error) {
       console.error('Error al iniciar juego:', error);
       socket.emit('error', { message: 'Error al iniciar el juego' });
@@ -250,7 +317,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     try {
       console.log('Cliente desconectado:', socket.id);
-
+      
       for (const [roomCode, room] of gameRooms.entries()) {
         if (room.host === socket.id) {
           io.to(roomCode).emit('hostDisconnected');
@@ -260,8 +327,8 @@ io.on('connection', (socket) => {
           const playerIndex = room.players.findIndex(p => p.id === socket.id);
           if (playerIndex !== -1) {
             room.players.splice(playerIndex, 1);
-            io.to(roomCode).emit('playersUpdate', {
-              players: room.players
+            io.to(roomCode).emit('playersUpdate', { 
+              players: room.players 
             });
             console.log(`Jugador eliminado de sala ${roomCode}`);
           }
