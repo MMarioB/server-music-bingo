@@ -2,11 +2,26 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const app = express();
 
+const allowedOrigins = [
+  'https://music-bingo-swart.vercel.app',
+  'http://localhost:5173',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 app.use(cors({
-  origin: ['https://music-bingo-swart.vercel.app/', 'http://localhost:5173'],
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST'],
   credentials: true
 }));
@@ -15,7 +30,13 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin: ['https://music-bingo-swart.vercel.app/', 'http://localhost:5173'],
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     methods: ['GET', 'POST'],
     credentials: true,
     allowedHeaders: ['*']
@@ -26,7 +47,7 @@ const io = new Server(httpServer, {
   allowUpgrades: true,
   maxHttpBufferSize: 1e8,
   connectTimeout: 45000,
-  allowEIO3: true // Permitir versiones anteriores del protocolo
+  allowEIO3: true
 });
 
 const gameRooms = new Map();
@@ -37,7 +58,7 @@ io.on('connection', (socket) => {
   socket.on('createRoom', async (config) => {
     try {
       const roomCode = config.roomCode || Math.random().toString(36).substring(2, 8).toUpperCase();
-      
+
       const roomData = {
         host: socket.id,
         players: [{
@@ -54,7 +75,7 @@ io.on('connection', (socket) => {
       gameRooms.set(roomCode, roomData);
       await socket.join(roomCode);
 
-      socket.emit('roomCreated', { 
+      socket.emit('roomCreated', {
         roomCode,
         players: roomData.players,
         config
@@ -74,15 +95,15 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', async ({ roomCode, name, ...playerInfo }) => {
     try {
       console.log(`Intento de unirse a sala ${roomCode} por ${socket.id}`, { name, playerInfo });
-      
+
       const room = gameRooms.get(roomCode);
-      
+
       if (!room) {
         socket.emit('error', { message: 'Sala no encontrada' });
         return;
       }
 
-      const existingPlayerIndex = room.players.findIndex(p => 
+      const existingPlayerIndex = room.players.findIndex(p =>
         p.name === name || p.id === socket.id
       );
 
@@ -229,7 +250,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     try {
       console.log('Cliente desconectado:', socket.id);
-      
+
       for (const [roomCode, room] of gameRooms.entries()) {
         if (room.host === socket.id) {
           io.to(roomCode).emit('hostDisconnected');
@@ -239,8 +260,8 @@ io.on('connection', (socket) => {
           const playerIndex = room.players.findIndex(p => p.id === socket.id);
           if (playerIndex !== -1) {
             room.players.splice(playerIndex, 1);
-            io.to(roomCode).emit('playersUpdate', { 
-              players: room.players 
+            io.to(roomCode).emit('playersUpdate', {
+              players: room.players
             });
             console.log(`Jugador eliminado de sala ${roomCode}`);
           }
@@ -264,7 +285,12 @@ setInterval(() => {
   }
 }, 300000); // Cada 5 minutos
 
+// Ruta de health check para Railway
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor escuchando en puerto ${PORT}`);
 });
