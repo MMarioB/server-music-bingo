@@ -9,6 +9,7 @@ dotenv.config();
 const app = express();
 
 const allowedOrigins = [
+  'https://www.discohitsbingo.com',
   'https://music-bingo-swart.vercel.app',
   'http://localhost:5173',
   process.env.FRONTEND_URL
