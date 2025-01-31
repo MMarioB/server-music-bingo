@@ -52,6 +52,90 @@ const io = new Server(httpServer, {
 });
 
 const gameRooms = new Map();
+const MAX_PLAYERS = 12;
+
+class ConnectionQueue {
+  constructor() {
+    this.queues = new Map();
+  }
+
+  async enqueue(roomCode, playerData) {
+    if (!this.queues.has(roomCode)) {
+      this.queues.set(roomCode, []);
+    }
+
+    const queue = this.queues.get(roomCode);
+    return new Promise((resolve, reject) => {
+      queue.push({ playerData, resolve, reject });
+      this.processQueue(roomCode);
+    });
+  }
+
+  async processQueue(roomCode) {
+    const queue = this.queues.get(roomCode);
+    if (!queue || queue.length === 0) return;
+
+    const room = gameRooms.get(roomCode);
+    if (!room) {
+      this.queues.delete(roomCode);
+      return;
+    }
+
+    while (queue.length > 0 && room.players.length < MAX_PLAYERS) {
+      const { playerData, resolve, reject } = queue.shift();
+
+      try {
+        await new Promise(r => setTimeout(r, 500)); // Add slight delay between connections
+
+        const existingPlayerIndex = room.players.findIndex(p =>
+          p.name === playerData.name || p.id === playerData.id
+        );
+
+        let isReconnecting = false;
+
+        if (existingPlayerIndex !== -1) {
+          isReconnecting = true;
+          room.players[existingPlayerIndex] = {
+            ...room.players[existingPlayerIndex],
+            id: playerData.id,
+            name: playerData.name,
+            reconnected: true,
+            ready: room.phase === 'playing'
+          };
+        } else {
+          room.players.push({
+            id: playerData.id,
+            name: playerData.name,
+            isHost: false,
+            joinedAt: new Date(),
+            ready: false
+          });
+        }
+
+        const result = {
+          roomCode,
+          players: room.players,
+          config: room.config,
+          phase: room.phase,
+          currentCategory: room.currentCategory,
+          gameState: room.gameState,
+          isReconnecting
+        };
+
+        resolve(result);
+
+        // Broadcast updated player list
+        io.to(roomCode).emit('playersUpdate', {
+          players: room.players
+        });
+      } catch (error) {
+        reject(error);
+      }
+    }
+  }
+}
+
+const connectionQueue = new ConnectionQueue();
 
 io.on('connection', (socket) => {
   console.log('Cliente conectado:', socket.id);
@@ -97,8 +181,6 @@ io.on('connection', (socket) => {
 
   socket.on('joinRoom', async ({ roomCode, name, ...playerInfo }) => {
     try {
-      console.log(`Intento de unirse a sala ${roomCode} por ${socket.id}`, { name, playerInfo });
-
       const room = gameRooms.get(roomCode);
 
       if (!room) {
@@ -106,50 +188,19 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const existingPlayerIndex = room.players.findIndex(p =>
-        p.name === name || p.id === socket.id
-      );
-
-      let isReconnecting = false;
-
-      if (existingPlayerIndex !== -1) {
-        isReconnecting = true;
-        room.players[existingPlayerIndex] = {
-          ...room.players[existingPlayerIndex],
-          id: socket.id,
-          name,
-          ...playerInfo,
-          reconnected: true,
-          ready: room.phase === 'playing'
-        };
-      } else {
-        room.players.push({
-          id: socket.id,
-          name,
-          isHost: false,
-          joinedAt: new Date(),
-          ready: false,
-          ...playerInfo
-        });
+      if (room.players.length >= MAX_PLAYERS) {
+        socket.emit('error', { message: 'Sala llena' });
+        return;
       }
 
+      const result = await connectionQueue.enqueue(roomCode, { 
+        id: socket.id, 
+        name, 
+        ...playerInfo 
+      });
+
       await socket.join(roomCode);
-
-      socket.emit('roomJoined', {
-        roomCode,
-        players: room.players,
-        config: room.config,
-        phase: room.phase,
-        currentCategory: room.currentCategory,
-        gameState: room.gameState,
-        isReconnecting
-      });
-
-      io.to(roomCode).emit('playersUpdate', {
-        players: room.players
-      });
-
-      console.log(`Jugador ${name} ${isReconnecting ? 'reconectado' : 'unido'} a sala ${roomCode}`);
+      socket.emit('roomJoined', result);
     } catch (error) {
       console.error('Error al unirse a sala:', error);
       socket.emit('error', { message: 'Error al unirse a la sala' });
