@@ -124,7 +124,6 @@ class ConnectionQueue {
 
         resolve(result);
 
-        // Broadcast updated player list
         io.to(roomCode).emit('playersUpdate', {
           players: room.players
         });
@@ -156,7 +155,9 @@ io.on('connection', (socket) => {
         currentCategory: null,
         phase: 'waiting',
         createdAt: new Date(),
-        gameState: null
+        gameState: null,
+        predictions: new Map(),
+        songPlaying: false
       };
 
       gameRooms.set(roomCode, roomData);
@@ -236,14 +237,12 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Verificar que todos los jugadores estén ready
       const allPlayersReady = room.players.every(player => player.isHost || player.ready);
       if (!allPlayersReady) {
         socket.emit('error', { message: 'No todos los jugadores están listos' });
         return;
       }
 
-      // Iniciar el juego inmediatamente sin esperar confirmaciones adicionales
       room.phase = 'playing';
       room.config.difficulty = difficulty;
       room.gameState = {
@@ -252,7 +251,6 @@ io.on('connection', (socket) => {
         currentRound: 0
       };
 
-      // Emitir el evento de inicio a todos
       io.to(roomCode).emit('gameStarted', {
         difficulty,
         players: room.players,
@@ -261,6 +259,55 @@ io.on('connection', (socket) => {
     } catch (error) {
       console.error('Error al iniciar juego:', error);
       socket.emit('error', { message: 'Error al iniciar el juego' });
+    }
+  });
+
+  socket.on('startSong', ({ roomCode }) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.host !== socket.id) {
+        socket.emit('error', { message: 'No autorizado' });
+        return;
+      }
+
+      room.songPlaying = true;
+      room.predictions.clear();
+      
+      io.to(roomCode).emit('songStarted');
+    } catch (error) {
+      console.error('Error al iniciar reproducción:', error);
+      socket.emit('error', { message: 'Error al iniciar reproducción' });
+    }
+  });
+
+  socket.on('submitPrediction', ({ roomCode, prediction }) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || !room.songPlaying) {
+        socket.emit('error', { message: 'No se pueden hacer predicciones ahora' });
+        return;
+      }
+
+      const player = room.players.find(p => p.id === socket.id);
+      if (!player) {
+        socket.emit('error', { message: 'Jugador no encontrado' });
+        return;
+      }
+
+      if (!room.predictions.has(player.name)) {
+        room.predictions.set(player.name, []);
+      }
+      room.predictions.get(player.name).push(prediction);
+
+      socket.to(room.host).emit('playerPrediction', {
+        playerName: player.name,
+        prediction
+      });
+
+      socket.emit('predictionSubmitted');
+    } catch (error) {
+      console.error('Error al enviar predicción:', error);
+      socket.emit('error', { message: 'Error al enviar predicción' });
     }
   });
 
@@ -274,6 +321,8 @@ io.on('connection', (socket) => {
 
       room.currentCategory = category;
       room.phase = 'category';
+      room.songPlaying = false;
+      room.predictions.clear();
 
       io.to(roomCode).emit('categorySelected', { category });
     } catch (error) {
@@ -290,7 +339,17 @@ io.on('connection', (socket) => {
         return;
       }
 
-      io.to(roomCode).emit('songRevealed', songData);
+      room.songPlaying = false;
+      
+      const predictionsArray = Array.from(room.predictions.entries()).map(([player, preds]) => ({
+        player,
+        predictions: preds
+      }));
+
+      io.to(roomCode).emit('songRevealed', {
+        ...songData,
+        predictions: predictionsArray
+      });
     } catch (error) {
       console.error('Error al revelar canción:', error);
       socket.emit('error', { message: 'Error al revelar canción' });
@@ -370,19 +429,17 @@ io.on('connection', (socket) => {
   });
 });
 
-// Limpieza periódica de salas inactivas
 setInterval(() => {
   const now = new Date();
   for (const [roomCode, room] of gameRooms.entries()) {
     const inactiveTime = now - room.createdAt;
-    if (inactiveTime > 3600000) { // 1 hora
+    if (inactiveTime > 3600000) {
       gameRooms.delete(roomCode);
       console.log(`Sala ${roomCode} eliminada por inactividad`);
     }
   }
-}, 300000); // Cada 5 minutos
+}, 300000);
 
-// Ruta de health check para Railway
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
 });
