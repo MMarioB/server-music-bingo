@@ -3,7 +3,6 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import axios from 'axios';
 
 dotenv.config();
 
@@ -52,73 +51,6 @@ const io = new Server(httpServer, {
   allowEIO3: true
 });
 
-// Clase para manejar los tokens de Spotify
-class SpotifyTokenManager {
-  constructor() {
-    this.tokens = new Map(); // Almacena los tokens por sala: roomCode -> tokenData
-  }
-
-  setToken(roomCode, tokenData) {
-    this.tokens.set(roomCode, {
-      ...tokenData,
-      expiresAt: Date.now() + (tokenData.expires_in * 1000)
-    });
-  }
-
-  async refreshToken(roomCode) {
-    const tokenData = this.tokens.get(roomCode);
-    if (!tokenData || !tokenData.refresh_token) {
-      throw new Error('No refresh token available');
-    }
-
-    try {
-      const response = await axios.post('https://accounts.spotify.com/api/token',
-        new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: tokenData.refresh_token
-        }), {
-        headers: {
-          'Authorization': `Basic ${Buffer.from(
-            `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
-          ).toString('base64')}`,
-          'Content-Type': 'application/x-www-form-urlencoded'
-        }
-      });
-
-      const newTokenData = {
-        ...response.data,
-        refresh_token: tokenData.refresh_token, // Mantener el refresh_token anterior si no viene uno nuevo
-        expiresAt: Date.now() + (response.data.expires_in * 1000)
-      };
-
-      this.tokens.set(roomCode, newTokenData);
-      return newTokenData;
-    } catch (error) {
-      console.error('Error refreshing Spotify token:', error);
-      throw error;
-    }
-  }
-
-  async getValidToken(roomCode) {
-    const tokenData = this.tokens.get(roomCode);
-    if (!tokenData) {
-      throw new Error('No token data available');
-    }
-
-    // Si el token expira en menos de 5 minutos, refrescarlo
-    if (tokenData.expiresAt - Date.now() < 300000) {
-      return this.refreshToken(roomCode);
-    }
-
-    return tokenData;
-  }
-
-  removeToken(roomCode) {
-    this.tokens.delete(roomCode);
-  }
-}
-
-const spotifyTokenManager = new SpotifyTokenManager();
 const gameRooms = new Map();
 const MAX_PLAYERS = 12;
 
@@ -211,11 +143,6 @@ io.on('connection', (socket) => {
     try {
       const roomCode = config.roomCode || Math.random().toString(36).substring(2, 8).toUpperCase();
 
-      // Guardar el token inicial de Spotify si está presente
-      if (config.spotifyToken) {
-        spotifyTokenManager.setToken(roomCode, config.spotifyToken);
-      }
-
       const roomData = {
         host: socket.id,
         players: [{
@@ -253,25 +180,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('requestSpotifyToken', async ({ roomCode }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room) {
-        socket.emit('error', { message: 'Sala no encontrada' });
-        return;
-      }
-
-      const tokenData = await spotifyTokenManager.getValidToken(roomCode);
-      socket.emit('spotifyTokenUpdated', {
-        access_token: tokenData.access_token,
-        expires_in: Math.floor((tokenData.expiresAt - Date.now()) / 1000)
-      });
-    } catch (error) {
-      console.error('Error al obtener token de Spotify:', error);
-      socket.emit('error', { message: 'Error al actualizar token de Spotify' });
-    }
-  });
-
   socket.on('joinRoom', async ({ roomCode, name, ...playerInfo }) => {
     try {
       const room = gameRooms.get(roomCode);
@@ -286,10 +194,10 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const result = await connectionQueue.enqueue(roomCode, {
-        id: socket.id,
-        name,
-        ...playerInfo
+      const result = await connectionQueue.enqueue(roomCode, { 
+        id: socket.id, 
+        name, 
+        ...playerInfo 
       });
 
       await socket.join(roomCode);
@@ -354,7 +262,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('startSong', async ({ roomCode }) => {
+  socket.on('startSong', ({ roomCode }) => {
     try {
       const room = gameRooms.get(roomCode);
       if (!room || room.host !== socket.id) {
@@ -362,22 +270,9 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Verificar y refrescar token de Spotify antes de iniciar la canción
-      try {
-        const tokenData = await spotifyTokenManager.getValidToken(roomCode);
-        socket.emit('spotifyTokenUpdated', {
-          access_token: tokenData.access_token,
-          expires_in: Math.floor((tokenData.expiresAt - Date.now()) / 1000)
-        });
-      } catch (error) {
-        console.error('Error al actualizar token de Spotify:', error);
-        socket.emit('error', { message: 'Error al actualizar token de Spotify' });
-        return;
-      }
-
       room.songPlaying = true;
       room.predictions.clear();
-
+      
       io.to(roomCode).emit('songStarted');
     } catch (error) {
       console.error('Error al iniciar reproducción:', error);
@@ -445,7 +340,7 @@ io.on('connection', (socket) => {
       }
 
       room.songPlaying = false;
-
+      
       const predictionsArray = Array.from(room.predictions.entries()).map(([player, preds]) => ({
         player,
         predictions: preds
@@ -516,7 +411,6 @@ io.on('connection', (socket) => {
         if (room.host === socket.id) {
           io.to(roomCode).emit('hostDisconnected');
           gameRooms.delete(roomCode);
-          spotifyTokenManager.removeToken(roomCode); // Limpiar token al cerrar la sala
           console.log(`Sala ${roomCode} eliminada`);
         } else {
           const playerIndex = room.players.findIndex(p => p.id === socket.id);
@@ -535,18 +429,16 @@ io.on('connection', (socket) => {
   });
 });
 
-// Limpiar salas inactivas
 setInterval(() => {
   const now = new Date();
   for (const [roomCode, room] of gameRooms.entries()) {
     const inactiveTime = now - room.createdAt;
-    if (inactiveTime > 3600000) { // 1 hora de inactividad
+    if (inactiveTime > 3600000) {
       gameRooms.delete(roomCode);
-      spotifyTokenManager.removeToken(roomCode); // Limpiar token de salas inactivas
       console.log(`Sala ${roomCode} eliminada por inactividad`);
     }
   }
-}, 300000); // Revisar cada 5 minutos
+}, 300000);
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
