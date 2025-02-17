@@ -422,34 +422,32 @@ io.on('connection', (socket) => {
         socket.emit('error', { message: 'No autorizado' });
         return;
       }
-
+  
       room.phase = 'marking';
-
-      // Logs de depuración
+      
       console.log('Habilitando marcado para sala:', roomCode);
       console.log('Jugadores elegibles recibidos:', eligiblePlayers);
-      console.log('Jugadores en la sala:', room.players.map(p => ({
-        id: p.id,
-        name: p.name
+      console.log('Jugadores en la sala:', room.players.map(p => ({ 
+        id: p.id, 
+        name: p.name 
       })));
-
+      
       // Asegurarnos de que eligiblePlayers es un array
       const validEligiblePlayers = Array.isArray(eligiblePlayers) ? eligiblePlayers : [];
-
+      
       // Verificar que los jugadores elegibles existen en la sala
-      const validatedPlayers = validEligiblePlayers.filter(id =>
-        room.players.some(p => p.id === id || p.name === id)
+      const validatedPlayers = validEligiblePlayers.filter(id => 
+        room.players.some(p => p.id === id)
       );
-
+  
       console.log('Jugadores elegibles validados:', validatedPlayers);
-
+  
       // Marcar los jugadores elegibles en el estado de la sala
       room.players.forEach(player => {
-        player.isEligibleToMark = validatedPlayers.includes(player.id) ||
-          validatedPlayers.includes(player.name);
+        player.isEligibleToMark = validatedPlayers.includes(player.id);
       });
-
-      io.to(roomCode).emit('markingEnabled', {
+  
+      io.to(roomCode).emit('markingEnabled', { 
         eligiblePlayers: validatedPlayers
       });
     } catch (error) {
