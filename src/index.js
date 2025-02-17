@@ -427,28 +427,23 @@ io.on('connection', (socket) => {
       
       console.log('Habilitando marcado para sala:', roomCode);
       console.log('Jugadores elegibles recibidos:', eligiblePlayers);
-      console.log('Jugadores en la sala:', room.players.map(p => ({ 
-        id: p.id, 
-        name: p.name 
-      })));
       
-      // Asegurarnos de que eligiblePlayers es un array
-      const validEligiblePlayers = Array.isArray(eligiblePlayers) ? eligiblePlayers : [];
+      // Asegurarnos de que eligiblePlayers es un array y contiene IDs válidos
+      const validEligiblePlayers = Array.isArray(eligiblePlayers) 
+        ? eligiblePlayers.filter(id => room.players.some(p => p.id === id))
+        : [];
       
-      // Verificar que los jugadores elegibles existen en la sala
-      const validatedPlayers = validEligiblePlayers.filter(id => 
-        room.players.some(p => p.id === id)
-      );
+      console.log('Jugadores elegibles validados:', validEligiblePlayers);
   
-      console.log('Jugadores elegibles validados:', validatedPlayers);
-  
-      // Marcar los jugadores elegibles en el estado de la sala
+      // Actualizar el estado de elegibilidad en la sala
       room.players.forEach(player => {
-        player.isEligibleToMark = validatedPlayers.includes(player.id);
+        player.isEligibleToMark = validEligiblePlayers.includes(player.id);
+        console.log(`Jugador ${player.name} (${player.id}): ${player.isEligibleToMark ? 'elegible' : 'no elegible'}`);
       });
   
+      // Emitir el evento a todos los jugadores con la lista actualizada
       io.to(roomCode).emit('markingEnabled', { 
-        eligiblePlayers: validatedPlayers
+        eligiblePlayers: validEligiblePlayers
       });
     } catch (error) {
       console.error('Error al habilitar marcado:', error);
