@@ -100,7 +100,8 @@ class ConnectionQueue {
             id: playerData.id,
             name: playerData.name,
             reconnected: true,
-            ready: room.phase === 'playing'
+            ready: room.phase === 'playing',
+            isCorrect: false
           };
         } else {
           room.players.push({
@@ -108,7 +109,8 @@ class ConnectionQueue {
             name: playerData.name,
             isHost: false,
             joinedAt: new Date(),
-            ready: false
+            ready: false,
+            isCorrect: false
           });
         }
 
@@ -149,7 +151,8 @@ io.on('connection', (socket) => {
           id: socket.id,
           name: 'Game Master',
           isHost: true,
-          ready: true
+          ready: true,
+          isCorrect: false
         }],
         config,
         currentCategory: null,
@@ -194,10 +197,10 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const result = await connectionQueue.enqueue(roomCode, { 
-        id: socket.id, 
-        name, 
-        ...playerInfo 
+      const result = await connectionQueue.enqueue(roomCode, {
+        id: socket.id,
+        name,
+        ...playerInfo
       });
 
       await socket.join(roomCode);
@@ -272,7 +275,12 @@ io.on('connection', (socket) => {
 
       room.songPlaying = true;
       room.predictions.clear();
-      
+
+      // Resetear los estados de acierto al iniciar nueva canción
+      room.players.forEach(player => {
+        player.isCorrect = false;
+      });
+
       io.to(roomCode).emit('songStarted');
     } catch (error) {
       console.error('Error al iniciar reproducción:', error);
@@ -324,6 +332,11 @@ io.on('connection', (socket) => {
       room.songPlaying = false;
       room.predictions.clear();
 
+      // Resetear los estados de acierto al cambiar de categoría
+      room.players.forEach(player => {
+        player.isCorrect = false;
+      });
+
       io.to(roomCode).emit('categorySelected', { category });
     } catch (error) {
       console.error('Error al seleccionar categoría:', error);
@@ -340,7 +353,7 @@ io.on('connection', (socket) => {
       }
 
       room.songPlaying = false;
-      
+
       const predictionsArray = Array.from(room.predictions.entries()).map(([player, preds]) => ({
         player,
         predictions: preds
@@ -356,6 +369,39 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('markPlayerCorrect', ({ roomCode, playerId, isCorrect }) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.host !== socket.id) {
+        socket.emit('error', { message: 'No autorizado' });
+        return;
+      }
+
+      if (room.phase !== 'marking') {
+        socket.emit('error', { message: 'El marcado no está habilitado' });
+        return;
+      }
+
+      const player = room.players.find(p => p.id === playerId);
+      if (!player) {
+        socket.emit('error', { message: 'Jugador no encontrado' });
+        return;
+      }
+
+      // Actualizar el estado de acierto del jugador
+      player.isCorrect = isCorrect;
+
+      // Notificar a todos los clientes sobre el cambio
+      io.to(roomCode).emit('playerMarked', {
+        playerId,
+        isCorrect
+      });
+    } catch (error) {
+      console.error('Error al marcar jugador:', error);
+      socket.emit('error', { message: 'Error al marcar jugador' });
+    }
+  });
+
   socket.on('enableMarking', ({ roomCode }) => {
     try {
       const room = gameRooms.get(roomCode);
@@ -365,6 +411,12 @@ io.on('connection', (socket) => {
       }
 
       room.phase = 'marking';
+
+      // Resetear los estados de acierto al habilitar el marcado
+      room.players.forEach(player => {
+        player.isCorrect = false;
+      });
+
       io.to(roomCode).emit('markingEnabled');
     } catch (error) {
       console.error('Error al habilitar marcado:', error);
@@ -381,7 +433,13 @@ io.on('connection', (socket) => {
       }
 
       room.phase = 'waiting';
-      io.to(roomCode).emit('markingDisabled');
+
+      // Enviar el resumen final de aciertos
+      const correctPlayers = room.players
+        .filter(player => player.isCorrect)
+        .map(player => player.id);
+
+      io.to(roomCode).emit('markingDisabled', { correctPlayers });
     } catch (error) {
       console.error('Error al deshabilitar marcado:', error);
       socket.emit('error', { message: 'Error al deshabilitar marcado' });
@@ -433,12 +491,12 @@ setInterval(() => {
   const now = new Date();
   for (const [roomCode, room] of gameRooms.entries()) {
     const inactiveTime = now - room.createdAt;
-    if (inactiveTime > 3600000) {
+    if (inactiveTime > 3600000) { // 1 hora
       gameRooms.delete(roomCode);
       console.log(`Sala ${roomCode} eliminada por inactividad`);
     }
   }
-}, 300000);
+}, 300000); // Revisar cada 5 minutos
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
