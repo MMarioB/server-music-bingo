@@ -163,7 +163,9 @@ io.on('connection', (socket) => {
         createdAt: new Date(),
         gameState: null,
         predictions: new Map(),
-        songPlaying: false
+        songPlaying: false,
+        gameOver: false,
+        winners: []
       };
 
       gameRooms.set(roomCode, roomData);
@@ -517,10 +519,77 @@ io.on('connection', (socket) => {
         return;
       }
 
-      io.to(roomCode).emit('gameWinner', { playerName });
+      // Encontrar al jugador y marcarlo como ganador
+      const player = room.players.find(p => p.id === socket.id);
+      if (player) {
+        player.isWinner = true;
+      }
+
+      // Enviar el evento a todos los jugadores incluyendo al game master
+      io.to(roomCode).emit('playerWon', { 
+        playerId: socket.id,
+        playerName: playerName
+      });
     } catch (error) {
       console.error('Error al anunciar ganador:', error);
       socket.emit('error', { message: 'Error al anunciar ganador' });
+    }
+  });
+
+  socket.on('gameOver', ({ roomCode, winners }) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.host !== socket.id) {
+        socket.emit('error', { message: 'No autorizado' });
+        return;
+      }
+
+      room.phase = 'gameOver';
+      room.gameOver = true;
+      room.winners = winners || [];
+
+      // Notificar a todos los jugadores que el juego ha terminado
+      io.to(roomCode).emit('gameOver', { 
+        winners: room.winners
+      });
+    } catch (error) {
+      console.error('Error al finalizar juego:', error);
+      socket.emit('error', { message: 'Error al finalizar juego' });
+    }
+  });
+
+  socket.on('restartGame', ({ roomCode }) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.host !== socket.id) {
+        socket.emit('error', { message: 'No autorizado' });
+        return;
+      }
+
+      // Reiniciar el estado de la sala
+      room.phase = 'waiting';
+      room.gameOver = false;
+      room.currentCategory = null;
+      room.songPlaying = false;
+      room.predictions.clear();
+      room.winners = [];
+
+      // Reiniciar estados de todos los jugadores
+      room.players.forEach(player => {
+        player.isCorrect = false;
+        player.confirmedCorrect = false;
+        player.isWinner = false;
+        player.isEligibleToMark = false;
+        player.ready = player.isHost; // Solo el host está listo por defecto
+      });
+
+      // Notificar a todos sobre el reinicio
+      io.to(roomCode).emit('gameRestarted', {
+        players: room.players
+      });
+    } catch (error) {
+      console.error('Error al reiniciar juego:', error);
+      socket.emit('error', { message: 'Error al reiniciar juego' });
     }
   });
 
