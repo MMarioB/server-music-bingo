@@ -164,28 +164,35 @@ io.on('connection', (socket) => {
     emitGameState(roomCode);
   });
   
+  // --- CAMBIO AQUÍ ---
   socket.on('markPlayerCorrect', ({ roomCode, playerId }) => {
     const room = gameRooms.get(roomCode);
+    // La condición de fase es importante, ¡asegúrate de que sea 'reviewing' cuando hagas clic!
     if (!room || room.hostId !== socket.id || room.phase !== 'reviewing') return;
     const player = room.players.find(p => p.id === playerId);
-    if (player) { player.isCorrect = !player.isCorrect; }
-    socket.emit('playerMarked', { playerId, isCorrect: player?.isCorrect });
+    if (player) {
+      player.isCorrect = !player.isCorrect;
+    }
+    // Eliminamos el socket.emit('playerMarked', ...) porque no se usa.
+    // emitGameState es el que actualiza la UI de todos.
     emitGameState(roomCode);
   });
 
+  // --- CAMBIO AQUÍ ---
   socket.on('enableMarking', ({ roomCode }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
     room.isMarkingEnabled = true;
-    socket.emit('markingEnabled', { success: true });
+    // Eliminamos socket.emit('markingEnabled', ...)
     emitGameState(roomCode);
   });
   
+  // --- CAMBIO AQUÍ ---
   socket.on('disableMarking', ({ roomCode }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
     room.isMarkingEnabled = false;
-    socket.emit('markingDisabled', { success: true });
+    // Eliminamos socket.emit('markingDisabled', ...)
     emitGameState(roomCode);
   });
 
