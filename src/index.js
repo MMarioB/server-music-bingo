@@ -3,11 +3,9 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
-
 dotenv.config();
 
 const app = express();
-
 const allowedOrigins = [
   'https://www.discohitsbingo.com',
   'https://music-bingo-swart.vercel.app',
@@ -28,7 +26,6 @@ app.use(cors({
 }));
 
 const httpServer = createServer(app);
-
 const io = new Server(httpServer, {
   cors: {
     origin: (origin, callback) => {
@@ -40,581 +37,219 @@ const io = new Server(httpServer, {
     },
     methods: ['GET', 'POST'],
     credentials: true,
-    allowedHeaders: ['*']
   },
   pingTimeout: 60000,
   pingInterval: 25000,
-  transports: ['polling', 'websocket'],
-  allowUpgrades: true,
-  maxHttpBufferSize: 1e8,
-  connectTimeout: 45000,
-  allowEIO3: true
 });
 
 const gameRooms = new Map();
-const MAX_PLAYERS = 12;
 
-class ConnectionQueue {
-  constructor() {
-    this.queues = new Map();
-  }
+// --- HELPER PRINCIPAL: LA NUEVA FUENTE DE VERDAD ---
+// Esta función construye el estado completo del juego y lo emite.
+const emitGameState = (roomCode) => {
+  const room = gameRooms.get(roomCode);
+  if (!room) return;
 
-  async enqueue(roomCode, playerData) {
-    if (!this.queues.has(roomCode)) {
-      this.queues.set(roomCode, []);
-    }
+  // Objeto que representa el estado completo que el cliente necesita
+  const gameState = {
+    gameStep: room.phase,
+    connectedPlayers: room.players,
+    currentCard: room.currentCard,
+    selectedCategory: room.currentCategory,
+    isMarkingEnabled: room.isMarkingEnabled,
+    songPlaying: room.songPlaying,
+    playerCorrectStatus: room.players.reduce((acc, player) => {
+      acc[player.id] = !!player.isCorrect;
+      return acc;
+    }, {}),
+    winners: room.winners,
+    gameOver: room.gameOver,
+  };
 
-    const queue = this.queues.get(roomCode);
-    return new Promise((resolve, reject) => {
-      queue.push({ playerData, resolve, reject });
-      this.processQueue(roomCode);
-    });
-  }
-
-  async processQueue(roomCode) {
-    const queue = this.queues.get(roomCode);
-    if (!queue || queue.length === 0) return;
-
-    const room = gameRooms.get(roomCode);
-    if (!room) {
-      this.queues.delete(roomCode);
-      return;
-    }
-
-    while (queue.length > 0 && room.players.length < MAX_PLAYERS) {
-      const { playerData, resolve, reject } = queue.shift();
-
-      try {
-        await new Promise(r => setTimeout(r, 500));
-
-        const existingPlayerIndex = room.players.findIndex(p =>
-          p.name === playerData.name || p.id === playerData.id
-        );
-
-        let isReconnecting = false;
-
-        if (existingPlayerIndex !== -1) {
-          isReconnecting = true;
-          room.players[existingPlayerIndex] = {
-            ...room.players[existingPlayerIndex],
-            id: playerData.id,
-            name: playerData.name,
-            reconnected: true,
-            ready: room.phase === 'playing',
-            isCorrect: false,
-            confirmedCorrect: false
-          };
-        } else {
-          room.players.push({
-            id: playerData.id,
-            name: playerData.name,
-            isHost: false,
-            joinedAt: new Date(),
-            ready: false,
-            isCorrect: false,
-            confirmedCorrect: false
-          });
-        }
-
-        const result = {
-          roomCode,
-          players: room.players,
-          config: room.config,
-          phase: room.phase,
-          currentCategory: room.currentCategory,
-          gameState: room.gameState,
-          isReconnecting
-        };
-
-        resolve(result);
-
-        io.to(roomCode).emit('playersUpdate', {
-          players: room.players
-        });
-      } catch (error) {
-        reject(error);
-      }
-    }
-  }
-}
-
-const connectionQueue = new ConnectionQueue();
+  io.to(roomCode).emit('gameStateUpdate', gameState);
+  console.log(`[STATE UPDATE] Sala ${roomCode} actualizada. Fase: ${room.phase}`);
+};
 
 io.on('connection', (socket) => {
   console.log('Cliente conectado:', socket.id);
 
-  socket.on('createRoom', async (config) => {
-    try {
-      const roomCode = config.roomCode || Math.random().toString(36).substring(2, 8).toUpperCase();
+  socket.on('createRoom', (config) => {
+    const roomCode = config.roomCode || Math.random().toString(36).substring(2, 7).toUpperCase();
+    const hostPlayer = { id: socket.id, name: 'Game Master', isHost: true, ready: true };
+    
+    gameRooms.set(roomCode, {
+      hostId: socket.id,
+      players: [hostPlayer],
+      config,
+      phase: 'waiting', // waiting -> wheel -> card -> reviewing -> gameOver
+      currentCard: null,
+      currentCategory: null,
+      isMarkingEnabled: false,
+      songPlaying: false,
+      winners: [],
+      gameOver: false,
+      createdAt: new Date(),
+    });
 
-      const roomData = {
-        host: socket.id,
-        players: [{
-          id: socket.id,
-          name: 'Game Master',
-          isHost: true,
-          ready: true,
-          isCorrect: false,
-          confirmedCorrect: false
-        }],
-        config,
-        currentCategory: null,
-        phase: 'waiting',
-        createdAt: new Date(),
-        gameState: null,
-        predictions: new Map(),
-        songPlaying: false,
-        gameOver: false,
-        winners: []
-      };
+    socket.join(roomCode);
+    console.log(`Sala creada: ${roomCode} por ${socket.id}`);
+    
+    socket.emit('roomCreated', { roomCode, players: [hostPlayer], config });
+  });
 
-      gameRooms.set(roomCode, roomData);
-      await socket.join(roomCode);
+  socket.on('joinRoom', ({ roomCode, name, isHost }) => {
+    const room = gameRooms.get(roomCode);
+    if (!room) return socket.emit('error', { message: 'Sala no encontrada' });
+    if (room.players.length >= 12 && !room.players.some(p => p.id === socket.id)) {
+        return socket.emit('error', { message: 'Sala llena' });
+    }
 
-      socket.emit('roomCreated', {
+    socket.join(roomCode);
+
+    const existingPlayer = room.players.find(p => p.id === socket.id);
+    if (!existingPlayer && !isHost) {
+        room.players.push({ id: socket.id, name, isHost: false, ready: false, isCorrect: false });
+    }
+    
+    socket.emit('roomJoined', {
         roomCode,
-        players: roomData.players,
-        config
-      });
-
-      io.to(roomCode).emit('playersUpdate', {
-        players: roomData.players
-      });
-
-      console.log(`Sala creada: ${roomCode} por ${socket.id}`);
-    } catch (error) {
-      console.error('Error al crear sala:', error);
-      socket.emit('error', { message: 'Error al crear la sala' });
-    }
-  });
-
-  socket.on('joinRoom', async ({ roomCode, name, ...playerInfo }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-
-      if (!room) {
-        socket.emit('error', { message: 'Sala no encontrada' });
-        return;
-      }
-
-      if (room.players.length >= MAX_PLAYERS) {
-        socket.emit('error', { message: 'Sala llena' });
-        return;
-      }
-
-      const result = await connectionQueue.enqueue(roomCode, {
-        id: socket.id,
-        name,
-        ...playerInfo
-      });
-
-      await socket.join(roomCode);
-      socket.emit('roomJoined', result);
-    } catch (error) {
-      console.error('Error al unirse a sala:', error);
-      socket.emit('error', { message: 'Error al unirse a la sala' });
-    }
-  });
-
-  socket.on('playerReady', ({ roomCode }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room) {
-        socket.emit('error', { message: 'Sala no encontrada' });
-        return;
-      }
-
-      const player = room.players.find(p => p.id === socket.id);
-      if (player) {
-        player.ready = true;
-        io.to(roomCode).emit('playersUpdate', {
-          players: room.players
-        });
-      }
-    } catch (error) {
-      console.error('Error al marcar jugador como listo:', error);
-      socket.emit('error', { message: 'Error al actualizar estado del jugador' });
-    }
-  });
-
-  socket.on('startGame', ({ roomCode, difficulty }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || room.host !== socket.id) {
-        socket.emit('error', { message: 'No autorizado' });
-        return;
-      }
-
-      const allPlayersReady = room.players.every(player => player.isHost || player.ready);
-      if (!allPlayersReady) {
-        socket.emit('error', { message: 'No todos los jugadores están listos' });
-        return;
-      }
-
-      room.phase = 'playing';
-      room.config.difficulty = difficulty;
-      room.gameState = {
-        difficulty,
-        startedAt: new Date(),
-        currentRound: 0
-      };
-
-      io.to(roomCode).emit('gameStarted', {
-        difficulty,
         players: room.players,
-        gameState: room.gameState
-      });
-    } catch (error) {
-      console.error('Error al iniciar juego:', error);
-      socket.emit('error', { message: 'Error al iniciar el juego' });
-    }
+        difficulty: room.config.difficulty,
+        gameStep: room.phase
+    });
+    emitGameState(roomCode);
   });
-
-  socket.on('startSong', ({ roomCode }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || room.host !== socket.id) {
-        socket.emit('error', { message: 'No autorizado' });
-        return;
-      }
-
-      room.songPlaying = true;
-      room.predictions.clear();
-      room.phase = 'playing';
-
-      // Resetear los estados de acierto al iniciar nueva canción
-      room.players.forEach(player => {
-        player.isCorrect = false;
-        player.confirmedCorrect = false;
-      });
-
-      io.to(roomCode).emit('songStarted');
-    } catch (error) {
-      console.error('Error al iniciar reproducción:', error);
-      socket.emit('error', { message: 'Error al iniciar reproducción' });
-    }
-  });
-
-  socket.on('submitPrediction', ({ roomCode, prediction }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || !room.songPlaying) {
-        socket.emit('error', { message: 'No se pueden hacer predicciones ahora' });
-        return;
-      }
-
-      const player = room.players.find(p => p.id === socket.id);
-      if (!player) {
-        socket.emit('error', { message: 'Jugador no encontrado' });
-        return;
-      }
-
-      if (!room.predictions.has(player.name)) {
-        room.predictions.set(player.name, []);
-      }
-      room.predictions.get(player.name).push(prediction);
-
-      socket.to(room.host).emit('playerPrediction', {
-        playerName: player.name,
-        prediction
-      });
-
-      socket.emit('predictionSubmitted');
-    } catch (error) {
-      console.error('Error al enviar predicción:', error);
-      socket.emit('error', { message: 'Error al enviar predicción' });
-    }
-  });
-
+  
   socket.on('selectCategory', ({ roomCode, category }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || room.host !== socket.id) {
-        socket.emit('error', { message: 'No autorizado' });
-        return;
-      }
+    const room = gameRooms.get(roomCode);
+    if (!room || room.hostId !== socket.id) return;
+    
+    room.phase = 'card';
+    room.currentCategory = category;
+    room.isMarkingEnabled = false;
+    room.songPlaying = false;
+    room.currentCard = null;
+    room.players.forEach(p => p.isCorrect = false);
 
-      room.currentCategory = category;
-      room.phase = 'category';
-      room.songPlaying = false;
-      room.predictions.clear();
-
-      // Resetear los estados de acierto al cambiar de categoría
-      room.players.forEach(player => {
-        player.isCorrect = false;
-        player.confirmedCorrect = false;
-      });
-
-      io.to(roomCode).emit('categorySelected', { category });
-    } catch (error) {
-      console.error('Error al seleccionar categoría:', error);
-      socket.emit('error', { message: 'Error al seleccionar categoría' });
-    }
+    socket.emit('categorySelected', { success: true });
+    emitGameState(roomCode);
   });
-
-  socket.on('revealSong', ({ roomCode, songData }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || room.host !== socket.id) {
-        socket.emit('error', { message: 'No autorizado' });
-        return;
-      }
-
-      room.songPlaying = false;
-      room.phase = 'reviewing'; // Nueva fase para revisión de aciertos
-
-      const predictionsArray = Array.from(room.predictions.entries()).map(([player, preds]) => ({
-        player,
-        predictions: preds
-      }));
-
-      // Resetear los estados de acierto al revelar
-      room.players.forEach(player => {
-        player.isCorrect = false;
-        player.confirmedCorrect = false;
-      });
-
-      io.to(roomCode).emit('songRevealed', {
-        ...songData,
-        predictions: predictionsArray
-      });
-    } catch (error) {
-      console.error('Error al revelar canción:', error);
-      socket.emit('error', { message: 'Error al revelar canción' });
-    }
-  });
-
-  socket.on('markPlayerCorrect', ({ roomCode, playerId, isCorrect }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || room.host !== socket.id) {
-        socket.emit('error', { message: 'No autorizado' });
-        return;
-      }
-
-      if (room.phase !== 'reviewing') {
-        socket.emit('error', { message: 'No se puede marcar en este momento' });
-        return;
-      }
-
-      const player = room.players.find(p => p.id === playerId);
-      if (!player) {
-        socket.emit('error', { message: 'Jugador no encontrado' });
-        return;
-      }
-
-      // Marcar al jugador como correcto (pre-confirmación)
-      player.isCorrect = isCorrect;
-      console.log(`Jugador ${player.name} (${playerId}) marcado como: ${isCorrect}`);
-
-      io.to(roomCode).emit('playerMarked', {
-        playerId,
-        isCorrect
-      });
-    } catch (error) {
-      console.error('Error al marcar jugador:', error);
-      socket.emit('error', { message: 'Error al marcar jugador' });
-    }
-  });
-
-  socket.on('enableMarking', ({ roomCode, eligiblePlayers }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || room.host !== socket.id) {
-        socket.emit('error', { message: 'No autorizado' });
-        return;
-      }
   
-      room.phase = 'marking';
-      
-      console.log('Habilitando marcado para sala:', roomCode);
-      console.log('Jugadores elegibles recibidos:', eligiblePlayers);
-      
-      // Asegurarnos de que eligiblePlayers es un array y contiene IDs válidos
-      const validEligiblePlayers = Array.isArray(eligiblePlayers) 
-        ? eligiblePlayers.filter(id => room.players.some(p => p.id === id))
-        : [];
-      
-      console.log('Jugadores elegibles validados:', validEligiblePlayers);
+  socket.on('startSong', ({ roomCode, track }) => {
+    const room = gameRooms.get(roomCode);
+    if (!room || room.hostId !== socket.id) return;
+    
+    room.phase = 'playing';
+    room.songPlaying = true;
+    room.currentCard = { ...track, revealed: false };
+    room.isMarkingEnabled = false;
+    room.players.forEach(p => p.isCorrect = false);
+
+    socket.emit('songStarted', { success: true });
+    emitGameState(roomCode);
+  });
   
-      // Actualizar el estado de elegibilidad en la sala
-      room.players.forEach(player => {
-        player.isEligibleToMark = validEligiblePlayers.includes(player.id);
-        console.log(`Jugador ${player.name} (${player.id}): ${player.isEligibleToMark ? 'elegible' : 'no elegible'}`);
-      });
-  
-      // Emitir el evento a todos los jugadores con la lista actualizada
-      io.to(roomCode).emit('markingEnabled', { 
-        eligiblePlayers: validEligiblePlayers
-      });
-    } catch (error) {
-      console.error('Error al habilitar marcado:', error);
-      socket.emit('error', { message: 'Error al habilitar marcado' });
+  socket.on('revealSong', ({ roomCode }) => {
+    const room = gameRooms.get(roomCode);
+    if (!room || room.hostId !== socket.id) return;
+    
+    room.phase = 'reviewing';
+    room.songPlaying = false;
+    if (room.currentCard) {
+      room.currentCard.revealed = true;
     }
+    emitGameState(roomCode);
   });
 
+  socket.on('markPlayerCorrect', ({ roomCode, playerId }) => {
+    const room = gameRooms.get(roomCode);
+    if (!room || room.hostId !== socket.id || room.phase !== 'reviewing') return;
+    
+    const player = room.players.find(p => p.id === playerId);
+    if (player) {
+      player.isCorrect = !player.isCorrect;
+    }
+    
+    socket.emit('playerMarked', { playerId, isCorrect: player?.isCorrect });
+    emitGameState(roomCode);
+  });
+
+  socket.on('enableMarking', ({ roomCode }) => {
+    const room = gameRooms.get(roomCode);
+    if (!room || room.hostId !== socket.id) return;
+
+    room.isMarkingEnabled = true;
+    socket.emit('markingEnabled', { success: true });
+    emitGameState(roomCode);
+  });
+  
   socket.on('disableMarking', ({ roomCode }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || room.host !== socket.id) {
-        socket.emit('error', { message: 'No autorizado' });
-        return;
-      }
-
-      room.phase = 'waiting';
-
-      // Limpiar estados de elegibilidad
-      room.players.forEach(player => {
-        player.isEligibleToMark = false;
-      });
-
-      // Enviar el resumen final
-      const correctPlayers = room.players
-        .filter(player => player.isCorrect)
-        .map(player => player.id);
-
-      io.to(roomCode).emit('markingDisabled', { correctPlayers });
-    } catch (error) {
-      console.error('Error al deshabilitar marcado:', error);
-      socket.emit('error', { message: 'Error al deshabilitar marcado' });
-    }
-  });
-
-  socket.on('confirmCorrect', ({ roomCode }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room) {
-        socket.emit('error', { message: 'Sala no encontrada' });
-        return;
-      }
-
-      const player = room.players.find(p => p.id === socket.id);
-      if (!player || !player.isCorrect) {
-        socket.emit('error', { message: 'No autorizado para confirmar' });
-        return;
-      }
-
-      if (room.phase !== 'marking') {
-        socket.emit('error', { message: 'No se puede confirmar en este momento' });
-        return;
-      }
-
-      player.confirmedCorrect = true;
-
-      io.to(roomCode).emit('playerConfirmed', {
-        playerId: socket.id,
-        confirmed: true
-      });
-    } catch (error) {
-      console.error('Error al confirmar acierto:', error);
-      socket.emit('error', { message: 'Error al confirmar acierto' });
-    }
+    const room = gameRooms.get(roomCode);
+    if (!room || room.hostId !== socket.id) return;
+    
+    room.isMarkingEnabled = false;
+    socket.emit('markingDisabled', { success: true });
+    emitGameState(roomCode);
   });
 
   socket.on('winner', ({ roomCode, playerName }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room) {
-        socket.emit('error', { message: 'Sala no encontrada' });
-        return;
-      }
+    const room = gameRooms.get(roomCode);
+    if (!room) return;
 
-      // Encontrar al jugador y marcarlo como ganador
-      const player = room.players.find(p => p.id === socket.id);
-      if (player) {
-        player.isWinner = true;
-      }
-
-      // Enviar el evento a todos los jugadores incluyendo al game master
-      io.to(roomCode).emit('playerWon', { 
-        playerId: socket.id,
-        playerName: playerName
-      });
-    } catch (error) {
-      console.error('Error al anunciar ganador:', error);
-      socket.emit('error', { message: 'Error al anunciar ganador' });
+    const winner = { id: socket.id, name: playerName };
+    if (!room.winners.some(w => w.id === winner.id)) {
+      room.winners.push(winner);
     }
+    emitGameState(roomCode);
   });
 
-  socket.on('gameOver', ({ roomCode, winners }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || room.host !== socket.id) {
-        socket.emit('error', { message: 'No autorizado' });
-        return;
-      }
-
-      room.phase = 'gameOver';
-      room.gameOver = true;
-      room.winners = winners || [];
-
-      // Notificar a todos los jugadores que el juego ha terminado
-      io.to(roomCode).emit('gameOver', { 
-        winners: room.winners
-      });
-    } catch (error) {
-      console.error('Error al finalizar juego:', error);
-      socket.emit('error', { message: 'Error al finalizar juego' });
-    }
+  socket.on('gameOver', ({ roomCode }) => {
+    const room = gameRooms.get(roomCode);
+    if (!room || room.hostId !== socket.id) return;
+    
+    room.phase = 'gameOver';
+    room.gameOver = true;
+    
+    socket.emit('gameOverConfirmed', { success: true });
+    emitGameState(roomCode);
   });
 
   socket.on('restartGame', ({ roomCode }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room || room.host !== socket.id) {
-        socket.emit('error', { message: 'No autorizado' });
+    const room = gameRooms.get(roomCode);
+    if (!room || room.hostId !== socket.id) return;
+    
+    room.phase = 'wheel';
+    room.currentCard = null;
+    room.currentCategory = null;
+    room.isMarkingEnabled = false;
+    room.songPlaying = false;
+    room.winners = [];
+    room.gameOver = false;
+    room.players.forEach(p => {
+      p.isCorrect = false;
+      p.ready = p.isHost;
+    });
+
+    socket.emit('gameRestarted', { success: true });
+    emitGameState(roomCode);
+  });
+  
+  socket.on('disconnect', () => {
+    console.log('Cliente desconectado:', socket.id);
+    for (const [roomCode, room] of gameRooms.entries()) {
+      if (room.hostId === socket.id) {
+        io.to(roomCode).emit('error', { message: 'El anfitrión se ha desconectado. La sala se ha cerrado.'});
+        gameRooms.delete(roomCode);
+        console.log(`Sala ${roomCode} cerrada por desconexión del host.`);
         return;
       }
-
-      // Reiniciar el estado de la sala
-      room.phase = 'waiting';
-      room.gameOver = false;
-      room.currentCategory = null;
-      room.songPlaying = false;
-      room.predictions.clear();
-      room.winners = [];
-
-      // Reiniciar estados de todos los jugadores
-      room.players.forEach(player => {
-        player.isCorrect = false;
-        player.confirmedCorrect = false;
-        player.isWinner = false;
-        player.isEligibleToMark = false;
-        player.ready = player.isHost; // Solo el host está listo por defecto
-      });
-
-      // Notificar a todos sobre el reinicio
-      io.to(roomCode).emit('gameRestarted', {
-        players: room.players
-      });
-    } catch (error) {
-      console.error('Error al reiniciar juego:', error);
-      socket.emit('error', { message: 'Error al reiniciar juego' });
-    }
-  });
-
-  socket.on('disconnect', () => {
-    try {
-      console.log('Cliente desconectado:', socket.id);
-
-      for (const [roomCode, room] of gameRooms.entries()) {
-        if (room.host === socket.id) {
-          io.to(roomCode).emit('hostDisconnected');
-          gameRooms.delete(roomCode);
-          console.log(`Sala ${roomCode} eliminada`);
-        } else {
-          const playerIndex = room.players.findIndex(p => p.id === socket.id);
-          if (playerIndex !== -1) {
-            room.players.splice(playerIndex, 1);
-            io.to(roomCode).emit('playersUpdate', {
-              players: room.players
-            });
-            console.log(`Jugador eliminado de sala ${roomCode}`);
-          }
-        }
+      
+      const playerIndex = room.players.findIndex(p => p.id === socket.id);
+      if (playerIndex > -1) {
+        room.players.splice(playerIndex, 1);
+        emitGameState(roomCode);
+        console.log(`Jugador ${socket.id} eliminado de la sala ${roomCode}.`);
       }
-    } catch (error) {
-      console.error('Error en desconexión:', error);
     }
   });
 });
@@ -622,16 +257,15 @@ io.on('connection', (socket) => {
 setInterval(() => {
   const now = new Date();
   for (const [roomCode, room] of gameRooms.entries()) {
-    const inactiveTime = now - room.createdAt;
-    if (inactiveTime > 3600000) { // 1 hora
+    if (now - room.createdAt > 3600000) { // 1 hora de inactividad
       gameRooms.delete(roomCode);
-      console.log(`Sala ${roomCode} eliminada por inactividad`);
+      console.log(`Sala ${roomCode} eliminada por inactividad.`);
     }
   }
-}, 300000); // Revisar cada 5 minutos
+}, 600000); // Revisar cada 10 minutos
 
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
+  res.status(200).json({ status: 'ok', rooms: gameRooms.size });
 });
 
 const PORT = process.env.PORT || 3001;
