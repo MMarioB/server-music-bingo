@@ -50,7 +50,6 @@ const emitGameState = (roomCode) => {
   const room = gameRooms.get(roomCode);
   if (!room) return;
 
-  // Objeto que representa el estado completo que el cliente necesita
   const gameState = {
     gameStep: room.phase,
     connectedPlayers: room.players,
@@ -65,7 +64,6 @@ const emitGameState = (roomCode) => {
     winners: room.winners,
     gameOver: room.gameOver,
   };
-
   io.to(roomCode).emit('gameStateUpdate', gameState);
   console.log(`[STATE UPDATE] Sala ${roomCode} actualizada. Fase: ${room.phase}`);
 };
@@ -81,7 +79,7 @@ io.on('connection', (socket) => {
       hostId: socket.id,
       players: [hostPlayer],
       config,
-      phase: 'waiting', // waiting -> wheel -> card -> reviewing -> gameOver
+      phase: 'waiting',
       currentCard: null,
       currentCategory: null,
       isMarkingEnabled: false,
@@ -90,7 +88,6 @@ io.on('connection', (socket) => {
       gameOver: false,
       createdAt: new Date(),
     });
-
     socket.join(roomCode);
     console.log(`Sala creada: ${roomCode} por ${socket.id}`);
     
@@ -103,9 +100,7 @@ io.on('connection', (socket) => {
     if (room.players.length >= 12 && !room.players.some(p => p.id === socket.id)) {
         return socket.emit('error', { message: 'Sala llena' });
     }
-
     socket.join(roomCode);
-
     const existingPlayer = room.players.find(p => p.id === socket.id);
     if (!existingPlayer && !isHost) {
         room.players.push({ id: socket.id, name, isHost: false, ready: false, isCorrect: false });
@@ -120,6 +115,25 @@ io.on('connection', (socket) => {
     emitGameState(roomCode);
   });
   
+  // <-- *** AÑADIDO: El handler que faltaba *** -->
+  socket.on('playerReady', ({ roomCode }) => {
+    console.log(`[RECEIVED] playerReady de ${socket.id} para la sala ${roomCode}`);
+    const room = gameRooms.get(roomCode);
+    if (!room) {
+      console.error(`Error: Sala ${roomCode} no encontrada para playerReady.`);
+      return;
+    }
+    const player = room.players.find(p => p.id === socket.id);
+    if (player) {
+      console.log(`Jugador ${player.name} encontrado. Marcando como listo.`);
+      player.ready = true;
+      emitGameState(roomCode);
+    } else {
+      console.error(`Error: Jugador con socket.id ${socket.id} no encontrado en la sala ${roomCode}.`);
+      console.log('Jugadores actuales en la sala:', room.players.map(p => ({id: p.id, name: p.name})));
+    }
+  });
+
   socket.on('selectCategory', ({ roomCode, category }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
@@ -130,11 +144,10 @@ io.on('connection', (socket) => {
     room.songPlaying = false;
     room.currentCard = null;
     room.players.forEach(p => p.isCorrect = false);
-
     socket.emit('categorySelected', { success: true });
     emitGameState(roomCode);
   });
-  
+
   socket.on('startSong', ({ roomCode, track }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
@@ -144,7 +157,6 @@ io.on('connection', (socket) => {
     room.currentCard = { ...track, revealed: false };
     room.isMarkingEnabled = false;
     room.players.forEach(p => p.isCorrect = false);
-
     socket.emit('songStarted', { success: true });
     emitGameState(roomCode);
   });
@@ -177,7 +189,6 @@ io.on('connection', (socket) => {
   socket.on('enableMarking', ({ roomCode }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
-
     room.isMarkingEnabled = true;
     socket.emit('markingEnabled', { success: true });
     emitGameState(roomCode);
@@ -195,7 +206,6 @@ io.on('connection', (socket) => {
   socket.on('winner', ({ roomCode, playerName }) => {
     const room = gameRooms.get(roomCode);
     if (!room) return;
-
     const winner = { id: socket.id, name: playerName };
     if (!room.winners.some(w => w.id === winner.id)) {
       room.winners.push(winner);
@@ -229,7 +239,6 @@ io.on('connection', (socket) => {
       p.isCorrect = false;
       p.ready = p.isHost;
     });
-
     socket.emit('gameRestarted', { success: true });
     emitGameState(roomCode);
   });
