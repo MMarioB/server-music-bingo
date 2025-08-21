@@ -92,68 +92,48 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', ({ roomCode, name, isHost }) => {
     const room = gameRooms.get(roomCode);
     if (!room) return socket.emit('error', { message: 'Sala no encontrada' });
-    if (room.players.length >= 12 && !room.players.some(p => p.id === socket.id)) {
-        return socket.emit('error', { message: 'Sala llena' });
-    }
     socket.join(roomCode);
     const existingPlayer = room.players.find(p => p.id === socket.id);
     if (!existingPlayer && !isHost) {
         room.players.push({ id: socket.id, name, isHost: false, ready: false, isCorrect: false });
     }
-    socket.emit('roomJoined', {
-        roomCode,
-        players: room.players,
-        difficulty: room.config.difficulty,
-        gameStep: room.phase
-    });
+    socket.emit('roomJoined', { roomCode, players: room.players, difficulty: room.config.difficulty, gameStep: room.phase });
     emitGameState(roomCode);
   });
   
   socket.on('playerReady', ({ roomCode }) => {
-    console.log(`[RECEIVED] playerReady de ${socket.id} para la sala ${roomCode}`);
     const room = gameRooms.get(roomCode);
-    if (!room) return console.error(`Error: Sala ${roomCode} no encontrada para playerReady.`);
+    if (!room) return;
     const player = room.players.find(p => p.id === socket.id);
     if (player) {
       player.ready = true;
       emitGameState(roomCode);
-    } else {
-      console.error(`Error: Jugador con socket.id ${socket.id} no encontrado en la sala ${roomCode}.`);
     }
   });
 
   socket.on('startGame', ({ roomCode, difficulty }) => {
-    console.log(`[RECEIVED] startGame de ${socket.id} para la sala ${roomCode}`);
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
     const allPlayersReady = room.players.every(p => p.ready);
     if (!allPlayersReady) return;
-    
     room.phase = 'wheel';
     if (difficulty) room.config.difficulty = difficulty;
-    
     emitGameState(roomCode);
   });
 
-  // <-- *** ESTE ES EL HANDLER QUE PROCESA LA RULETA *** -->
   socket.on('selectCategory', ({ roomCode, category }) => {
-    console.log(`[RECEIVED] selectCategory de ${socket.id} para la sala ${roomCode}`);
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
-    
-    room.phase = 'card'; // Cambiamos la fase para que la UI del host avance
+    room.phase = 'card';
     room.currentCategory = category;
     room.isMarkingEnabled = false;
     room.songPlaying = false;
     room.currentCard = null;
     room.players.forEach(p => p.isCorrect = false);
-
-    // Respondemos al host para que su promesa se resuelva
     socket.emit('categorySelected', { success: true });
-    // Y actualizamos a todos los jugadores con el nuevo estado
     emitGameState(roomCode);
+
   });
-  // <-- *** FIN DEL BLOQUE *** -->
   
   socket.on('startSong', ({ roomCode, track }) => {
     const room = gameRooms.get(roomCode);
@@ -167,6 +147,14 @@ io.on('connection', (socket) => {
     emitGameState(roomCode);
   });
   
+  socket.on('submitPrediction', ({ roomCode, prediction }) => {
+    const room = gameRooms.get(roomCode);
+    if (!room) return;
+    const player = room.players.find(p => p.id === socket.id);
+    if (!player) return;
+    io.to(room.hostId).emit('playerPrediction', { playerName: player.name, prediction: prediction });
+  });
+
   socket.on('revealSong', ({ roomCode }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
@@ -237,9 +225,9 @@ io.on('connection', (socket) => {
     console.log('Cliente desconectado:', socket.id);
     for (const [roomCode, room] of gameRooms.entries()) {
       if (room.hostId === socket.id) {
-        io.to(roomCode).emit('error', { message: 'El anfitrión se ha desconectado. La sala se ha cerrado.'});
+        io.to(roomCode).emit('error', { message: 'El anfitrión se ha desconectado.'});
         gameRooms.delete(roomCode);
-        console.log(`Sala ${roomCode} cerrada por desconexión del host.`);
+        console.log(`Sala ${roomCode} cerrada.`);
         return;
       }
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
@@ -255,7 +243,7 @@ io.on('connection', (socket) => {
 setInterval(() => {
   const now = new Date();
   for (const [roomCode, room] of gameRooms.entries()) {
-    if (now - room.createdAt > 3600000) { gameRooms.delete(roomCode); console.log(`Sala ${roomCode} eliminada por inactividad.`); }
+    if (now - room.createdAt > 3600000) { gameRooms.delete(roomCode); console.log(`Sala ${roomCode} eliminada.`); }
   }
 }, 600000);
 
