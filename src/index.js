@@ -44,12 +44,9 @@ const io = new Server(httpServer, {
 
 const gameRooms = new Map();
 
-// --- HELPER PRINCIPAL: LA NUEVA FUENTE DE VERDAD ---
-// Esta función construye el estado completo del juego y lo emite.
 const emitGameState = (roomCode) => {
   const room = gameRooms.get(roomCode);
   if (!room) return;
-
   const gameState = {
     gameStep: room.phase,
     connectedPlayers: room.players,
@@ -74,7 +71,6 @@ io.on('connection', (socket) => {
   socket.on('createRoom', (config) => {
     const roomCode = config.roomCode || Math.random().toString(36).substring(2, 7).toUpperCase();
     const hostPlayer = { id: socket.id, name: 'Game Master', isHost: true, ready: true };
-    
     gameRooms.set(roomCode, {
       hostId: socket.id,
       players: [hostPlayer],
@@ -90,7 +86,6 @@ io.on('connection', (socket) => {
     });
     socket.join(roomCode);
     console.log(`Sala creada: ${roomCode} por ${socket.id}`);
-    
     socket.emit('roomCreated', { roomCode, players: [hostPlayer], config });
   });
 
@@ -105,7 +100,6 @@ io.on('connection', (socket) => {
     if (!existingPlayer && !isHost) {
         room.players.push({ id: socket.id, name, isHost: false, ready: false, isCorrect: false });
     }
-    
     socket.emit('roomJoined', {
         roomCode,
         players: room.players,
@@ -115,13 +109,11 @@ io.on('connection', (socket) => {
     emitGameState(roomCode);
   });
   
-  // <-- *** AÑADIDO: El handler que faltaba *** -->
   socket.on('playerReady', ({ roomCode }) => {
     console.log(`[RECEIVED] playerReady de ${socket.id} para la sala ${roomCode}`);
     const room = gameRooms.get(roomCode);
     if (!room) {
-      console.error(`Error: Sala ${roomCode} no encontrada para playerReady.`);
-      return;
+      return console.error(`Error: Sala ${roomCode} no encontrada para playerReady.`);
     }
     const player = room.players.find(p => p.id === socket.id);
     if (player) {
@@ -134,10 +126,32 @@ io.on('connection', (socket) => {
     }
   });
 
+  // <-- *** AÑADIDO: El handler para iniciar el juego *** -->
+  socket.on('startGame', ({ roomCode, difficulty }) => {
+    console.log(`[RECEIVED] startGame de ${socket.id} para la sala ${roomCode}`);
+    const room = gameRooms.get(roomCode);
+    if (!room) {
+      return console.error(`Error: Sala ${roomCode} no encontrada para startGame.`);
+    }
+    if (room.hostId !== socket.id) {
+      return console.error(`Error: Socket ${socket.id} no es el host de la sala ${roomCode}.`);
+    }
+    const allPlayersReady = room.players.every(p => p.ready);
+    if (!allPlayersReady) {
+      return console.error(`Error: No todos los jugadores están listos en la sala ${roomCode}.`);
+    }
+    // Actualizar el estado de la sala para iniciar el juego
+    room.phase = 'wheel'; // Cambiamos la fase a 'wheel' para que todos avancen a la ruleta
+    if (difficulty) {
+      room.config.difficulty = difficulty;
+    }
+    emitGameState(roomCode);
+  });
+  // <-- *** FIN DEL BLOQUE AÑADIDO *** -->
+
   socket.on('selectCategory', ({ roomCode, category }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
-    
     room.phase = 'card';
     room.currentCategory = category;
     room.isMarkingEnabled = false;
@@ -147,11 +161,10 @@ io.on('connection', (socket) => {
     socket.emit('categorySelected', { success: true });
     emitGameState(roomCode);
   });
-
+  
   socket.on('startSong', ({ roomCode, track }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
-    
     room.phase = 'playing';
     room.songPlaying = true;
     room.currentCard = { ...track, revealed: false };
@@ -164,24 +177,17 @@ io.on('connection', (socket) => {
   socket.on('revealSong', ({ roomCode }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
-    
     room.phase = 'reviewing';
     room.songPlaying = false;
-    if (room.currentCard) {
-      room.currentCard.revealed = true;
-    }
+    if (room.currentCard) { room.currentCard.revealed = true; }
     emitGameState(roomCode);
   });
-
+  
   socket.on('markPlayerCorrect', ({ roomCode, playerId }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id || room.phase !== 'reviewing') return;
-    
     const player = room.players.find(p => p.id === playerId);
-    if (player) {
-      player.isCorrect = !player.isCorrect;
-    }
-    
+    if (player) { player.isCorrect = !player.isCorrect; }
     socket.emit('playerMarked', { playerId, isCorrect: player?.isCorrect });
     emitGameState(roomCode);
   });
@@ -197,7 +203,6 @@ io.on('connection', (socket) => {
   socket.on('disableMarking', ({ roomCode }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
-    
     room.isMarkingEnabled = false;
     socket.emit('markingDisabled', { success: true });
     emitGameState(roomCode);
@@ -207,19 +212,15 @@ io.on('connection', (socket) => {
     const room = gameRooms.get(roomCode);
     if (!room) return;
     const winner = { id: socket.id, name: playerName };
-    if (!room.winners.some(w => w.id === winner.id)) {
-      room.winners.push(winner);
-    }
+    if (!room.winners.some(w => w.id === winner.id)) { room.winners.push(winner); }
     emitGameState(roomCode);
   });
 
   socket.on('gameOver', ({ roomCode }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
-    
     room.phase = 'gameOver';
     room.gameOver = true;
-    
     socket.emit('gameOverConfirmed', { success: true });
     emitGameState(roomCode);
   });
@@ -227,7 +228,6 @@ io.on('connection', (socket) => {
   socket.on('restartGame', ({ roomCode }) => {
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
-    
     room.phase = 'wheel';
     room.currentCard = null;
     room.currentCategory = null;
@@ -235,10 +235,7 @@ io.on('connection', (socket) => {
     room.songPlaying = false;
     room.winners = [];
     room.gameOver = false;
-    room.players.forEach(p => {
-      p.isCorrect = false;
-      p.ready = p.isHost;
-    });
+    room.players.forEach(p => { p.isCorrect = false; p.ready = p.isHost; });
     socket.emit('gameRestarted', { success: true });
     emitGameState(roomCode);
   });
@@ -252,7 +249,6 @@ io.on('connection', (socket) => {
         console.log(`Sala ${roomCode} cerrada por desconexión del host.`);
         return;
       }
-      
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
       if (playerIndex > -1) {
         room.players.splice(playerIndex, 1);
@@ -266,12 +262,9 @@ io.on('connection', (socket) => {
 setInterval(() => {
   const now = new Date();
   for (const [roomCode, room] of gameRooms.entries()) {
-    if (now - room.createdAt > 3600000) { // 1 hora de inactividad
-      gameRooms.delete(roomCode);
-      console.log(`Sala ${roomCode} eliminada por inactividad.`);
-    }
+    if (now - room.createdAt > 3600000) { gameRooms.delete(roomCode); console.log(`Sala ${roomCode} eliminada por inactividad.`); }
   }
-}, 600000); // Revisar cada 10 minutos
+}, 600000);
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', rooms: gameRooms.size });
