@@ -112,55 +112,48 @@ io.on('connection', (socket) => {
   socket.on('playerReady', ({ roomCode }) => {
     console.log(`[RECEIVED] playerReady de ${socket.id} para la sala ${roomCode}`);
     const room = gameRooms.get(roomCode);
-    if (!room) {
-      return console.error(`Error: Sala ${roomCode} no encontrada para playerReady.`);
-    }
+    if (!room) return console.error(`Error: Sala ${roomCode} no encontrada para playerReady.`);
     const player = room.players.find(p => p.id === socket.id);
     if (player) {
-      console.log(`Jugador ${player.name} encontrado. Marcando como listo.`);
       player.ready = true;
       emitGameState(roomCode);
     } else {
       console.error(`Error: Jugador con socket.id ${socket.id} no encontrado en la sala ${roomCode}.`);
-      console.log('Jugadores actuales en la sala:', room.players.map(p => ({id: p.id, name: p.name})));
     }
   });
 
-  // <-- *** AÑADIDO: El handler para iniciar el juego *** -->
   socket.on('startGame', ({ roomCode, difficulty }) => {
     console.log(`[RECEIVED] startGame de ${socket.id} para la sala ${roomCode}`);
     const room = gameRooms.get(roomCode);
-    if (!room) {
-      return console.error(`Error: Sala ${roomCode} no encontrada para startGame.`);
-    }
-    if (room.hostId !== socket.id) {
-      return console.error(`Error: Socket ${socket.id} no es el host de la sala ${roomCode}.`);
-    }
+    if (!room || room.hostId !== socket.id) return;
     const allPlayersReady = room.players.every(p => p.ready);
-    if (!allPlayersReady) {
-      return console.error(`Error: No todos los jugadores están listos en la sala ${roomCode}.`);
-    }
-    // Actualizar el estado de la sala para iniciar el juego
-    room.phase = 'wheel'; // Cambiamos la fase a 'wheel' para que todos avancen a la ruleta
-    if (difficulty) {
-      room.config.difficulty = difficulty;
-    }
+    if (!allPlayersReady) return;
+    
+    room.phase = 'wheel';
+    if (difficulty) room.config.difficulty = difficulty;
+    
     emitGameState(roomCode);
   });
-  // <-- *** FIN DEL BLOQUE AÑADIDO *** -->
 
+  // <-- *** ESTE ES EL HANDLER QUE PROCESA LA RULETA *** -->
   socket.on('selectCategory', ({ roomCode, category }) => {
+    console.log(`[RECEIVED] selectCategory de ${socket.id} para la sala ${roomCode}`);
     const room = gameRooms.get(roomCode);
     if (!room || room.hostId !== socket.id) return;
-    room.phase = 'card';
+    
+    room.phase = 'card'; // Cambiamos la fase para que la UI del host avance
     room.currentCategory = category;
     room.isMarkingEnabled = false;
     room.songPlaying = false;
     room.currentCard = null;
     room.players.forEach(p => p.isCorrect = false);
+
+    // Respondemos al host para que su promesa se resuelva
     socket.emit('categorySelected', { success: true });
+    // Y actualizamos a todos los jugadores con el nuevo estado
     emitGameState(roomCode);
   });
+  // <-- *** FIN DEL BLOQUE *** -->
   
   socket.on('startSong', ({ roomCode, track }) => {
     const room = gameRooms.get(roomCode);
