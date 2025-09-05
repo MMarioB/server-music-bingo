@@ -47,11 +47,14 @@ const gameRooms = new Map();
 const emitGameState = (roomCode) => {
   const room = gameRooms.get(roomCode);
   if (!room) return;
+  
+  // CORREGIDO: Usar nombres consistentes con el cliente
   const gameState = {
     gameStep: room.phase,
     connectedPlayers: room.players,
     currentCard: room.currentCard,
-    selectedCategory: room.currentCategory,
+    currentCategory: room.currentCategory, // Cambié de selectedCategory
+    currentSong: room.currentCard, // Agregado para compatibilidad
     isMarkingEnabled: room.isMarkingEnabled,
     songPlaying: room.songPlaying,
     playerCorrectStatus: room.players.reduce((acc, player) => {
@@ -61,6 +64,7 @@ const emitGameState = (roomCode) => {
     winners: room.winners,
     gameOver: room.gameOver,
   };
+  
   io.to(roomCode).emit('gameStateUpdate', gameState);
   console.log(`[STATE UPDATE] Sala ${roomCode} actualizada. Fase: ${room.phase}`);
 };
@@ -68,164 +72,337 @@ const emitGameState = (roomCode) => {
 io.on('connection', (socket) => {
   console.log('Cliente conectado:', socket.id);
 
-  socket.on('createRoom', (config) => {
-    const roomCode = config.roomCode || Math.random().toString(36).substring(2, 7).toUpperCase();
-    const hostPlayer = { id: socket.id, name: 'Game Master', isHost: true, ready: true };
-    gameRooms.set(roomCode, {
-      hostId: socket.id,
-      players: [hostPlayer],
-      config,
-      phase: 'waiting',
-      currentCard: null,
-      currentCategory: null,
-      isMarkingEnabled: false,
-      songPlaying: false,
-      winners: [],
-      gameOver: false,
-      createdAt: new Date(),
-    });
-    socket.join(roomCode);
-    console.log(`Sala creada: ${roomCode} por ${socket.id}`);
-    socket.emit('roomCreated', { roomCode, players: [hostPlayer], config });
+  socket.on('createRoom', (config, callback) => {
+    try {
+      const roomCode = config.roomCode || Math.random().toString(36).substring(2, 7).toUpperCase();
+      const hostPlayer = { id: socket.id, name: 'Game Master', isHost: true, ready: true };
+      gameRooms.set(roomCode, {
+        hostId: socket.id,
+        players: [hostPlayer],
+        config,
+        phase: 'waiting',
+        currentCard: null,
+        currentCategory: null,
+        isMarkingEnabled: false,
+        songPlaying: false,
+        winners: [],
+        gameOver: false,
+        createdAt: new Date(),
+      });
+      socket.join(roomCode);
+      console.log(`Sala creada: ${roomCode} por ${socket.id}`);
+      
+      const response = { roomCode, players: [hostPlayer], config };
+      socket.emit('roomCreated', response);
+      if (callback) callback({ success: true, data: response });
+    } catch (error) {
+      console.error('Error creating room:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
   });
 
-  socket.on('joinRoom', ({ roomCode, name, isHost }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room) return socket.emit('error', { message: 'Sala no encontrada' });
-    socket.join(roomCode);
-    const existingPlayer = room.players.find(p => p.id === socket.id);
-    if (!existingPlayer && !isHost) {
+  socket.on('joinRoom', ({ roomCode, name, isHost }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room) {
+        const error = { message: 'Sala no encontrada' };
+        socket.emit('error', error);
+        if (callback) callback({ success: false, error: error.message });
+        return;
+      }
+      
+      socket.join(roomCode);
+      const existingPlayer = room.players.find(p => p.id === socket.id);
+      if (!existingPlayer && !isHost) {
         room.players.push({ id: socket.id, name, isHost: false, ready: false, isCorrect: false });
-    }
-    socket.emit('roomJoined', { roomCode, players: room.players, difficulty: room.config.difficulty, gameStep: room.phase });
-    emitGameState(roomCode);
-  });
-  
-  socket.on('playerReady', ({ roomCode }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room) return;
-    const player = room.players.find(p => p.id === socket.id);
-    if (player) {
-      player.ready = true;
+      }
+      
+      const response = { roomCode, players: room.players, difficulty: room.config.difficulty, gameStep: room.phase };
+      socket.emit('roomJoined', response);
       emitGameState(roomCode);
+      if (callback) callback({ success: true, data: response });
+    } catch (error) {
+      console.error('Error joining room:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
+  
+  socket.on('playerReady', ({ roomCode }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room) {
+        if (callback) callback({ success: false, error: 'Sala no encontrada' });
+        return;
+      }
+      
+      const player = room.players.find(p => p.id === socket.id);
+      if (player) {
+        player.ready = true;
+        emitGameState(roomCode);
+        if (callback) callback({ success: true });
+      } else {
+        if (callback) callback({ success: false, error: 'Jugador no encontrado' });
+      }
+    } catch (error) {
+      console.error('Error setting player ready:', error);
+      if (callback) callback({ success: false, error: error.message });
     }
   });
 
-  socket.on('startGame', ({ roomCode, difficulty }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room || room.hostId !== socket.id) return;
-    const allPlayersReady = room.players.every(p => p.ready);
-    if (!allPlayersReady) return;
-    room.phase = 'wheel';
-    if (difficulty) room.config.difficulty = difficulty;
-    emitGameState(roomCode);
+  socket.on('startGame', ({ roomCode, difficulty }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.hostId !== socket.id) {
+        if (callback) callback({ success: false, error: 'No autorizado' });
+        return;
+      }
+      
+      const allPlayersReady = room.players.every(p => p.ready);
+      if (!allPlayersReady) {
+        if (callback) callback({ success: false, error: 'No todos los jugadores están listos' });
+        return;
+      }
+      
+      room.phase = 'wheel';
+      if (difficulty) room.config.difficulty = difficulty;
+      emitGameState(roomCode);
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error('Error starting game:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
   });
 
-  socket.on('selectCategory', ({ roomCode, category }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room || room.hostId !== socket.id) return;
-    room.phase = 'card';
-    room.currentCategory = category;
-    room.isMarkingEnabled = false;
-    room.songPlaying = false;
-    room.currentCard = null;
-    room.players.forEach(p => p.isCorrect = false);
-    socket.emit('categorySelected', { success: true });
-    emitGameState(roomCode);
+  socket.on('selectCategory', ({ roomCode, category }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.hostId !== socket.id) {
+        if (callback) callback({ success: false, error: 'No autorizado' });
+        return;
+      }
+      
+      room.phase = 'card';
+      room.currentCategory = category;
+      room.isMarkingEnabled = false;
+      room.songPlaying = false;
+      room.currentCard = null;
+      room.players.forEach(p => p.isCorrect = false);
+      
+      socket.emit('categorySelected', { success: true });
+      emitGameState(roomCode);
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error('Error selecting category:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
+  
+  socket.on('startSong', ({ roomCode, track }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.hostId !== socket.id) {
+        if (callback) callback({ success: false, error: 'No autorizado' });
+        return;
+      }
+      
+      room.phase = 'playing';
+      room.songPlaying = true;
+      room.currentCard = { ...track, revealed: false };
+      room.isMarkingEnabled = false;
+      room.players.forEach(p => p.isCorrect = false);
+      
+      socket.emit('songStarted', { success: true });
+      emitGameState(roomCode);
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error('Error starting song:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
+  
+  socket.on('submitPrediction', ({ roomCode, prediction }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room) {
+        if (callback) callback({ success: false, error: 'Sala no encontrada' });
+        return;
+      }
+      
+      const player = room.players.find(p => p.id === socket.id);
+      if (!player) {
+        if (callback) callback({ success: false, error: 'Jugador no encontrado' });
+        return;
+      }
+      
+      io.to(room.hostId).emit('playerPrediction', { 
+        playerName: player.name, 
+        prediction: prediction 
+      });
+      
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error('Error submitting prediction:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
 
+  socket.on('revealSong', ({ roomCode }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.hostId !== socket.id) {
+        if (callback) callback({ success: false, error: 'No autorizado' });
+        return;
+      }
+      
+      room.phase = 'reviewing';
+      room.songPlaying = false;
+      if (room.currentCard) { 
+        room.currentCard.revealed = true; 
+      }
+      
+      emitGameState(roomCode);
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error('Error revealing song:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
   });
   
-  socket.on('startSong', ({ roomCode, track }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room || room.hostId !== socket.id) return;
-    room.phase = 'playing';
-    room.songPlaying = true;
-    room.currentCard = { ...track, revealed: false };
-    room.isMarkingEnabled = false;
-    room.players.forEach(p => p.isCorrect = false);
-    socket.emit('songStarted', { success: true });
-    emitGameState(roomCode);
-  });
-  
-  socket.on('submitPrediction', ({ roomCode, prediction }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room) return;
-    const player = room.players.find(p => p.id === socket.id);
-    if (!player) return;
-    io.to(room.hostId).emit('playerPrediction', { playerName: player.name, prediction: prediction });
-  });
-
-  socket.on('revealSong', ({ roomCode }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room || room.hostId !== socket.id) return;
-    room.phase = 'reviewing';
-    room.songPlaying = false;
-    if (room.currentCard) { room.currentCard.revealed = true; }
-    emitGameState(roomCode);
-  });
-  
-  // --- CAMBIO AQUÍ ---
-  socket.on('markPlayerCorrect', ({ roomCode, playerId }) => {
-    const room = gameRooms.get(roomCode);
-    // La condición de fase es importante, ¡asegúrate de que sea 'reviewing' cuando hagas clic!
-    if (!room || room.hostId !== socket.id || room.phase !== 'reviewing') return;
-    const player = room.players.find(p => p.id === playerId);
-    if (player) {
+  // CORREGIDO: Agregar callback para responder al cliente
+  socket.on('markPlayerCorrect', ({ roomCode, playerId }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.hostId !== socket.id || room.phase !== 'reviewing') {
+        if (callback) callback({ success: false, error: 'No autorizado o fase incorrecta' });
+        return;
+      }
+      
+      const player = room.players.find(p => p.id === playerId);
+      if (!player) {
+        if (callback) callback({ success: false, error: 'Jugador no encontrado' });
+        return;
+      }
+      
       player.isCorrect = !player.isCorrect;
+      emitGameState(roomCode);
+      
+      if (callback) callback({ success: true, playerId, isCorrect: player.isCorrect });
+    } catch (error) {
+      console.error('Error marking player:', error);
+      if (callback) callback({ success: false, error: error.message });
     }
-    // Eliminamos el socket.emit('playerMarked', ...) porque no se usa.
-    // emitGameState es el que actualiza la UI de todos.
-    emitGameState(roomCode);
   });
 
-  // --- CAMBIO AQUÍ ---
-  socket.on('enableMarking', ({ roomCode }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room || room.hostId !== socket.id) return;
-    room.isMarkingEnabled = true;
-    // Eliminamos socket.emit('markingEnabled', ...)
-    emitGameState(roomCode);
+  // CORREGIDO: Agregar callback
+  socket.on('enableMarking', ({ roomCode }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.hostId !== socket.id) {
+        if (callback) callback({ success: false, error: 'No autorizado' });
+        return;
+      }
+      
+      room.isMarkingEnabled = true;
+      emitGameState(roomCode);
+      
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error('Error enabling marking:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
   });
   
-  // --- CAMBIO AQUÍ ---
-  socket.on('disableMarking', ({ roomCode }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room || room.hostId !== socket.id) return;
-    room.isMarkingEnabled = false;
-    // Eliminamos socket.emit('markingDisabled', ...)
-    emitGameState(roomCode);
+  // CORREGIDO: Agregar callback
+  socket.on('disableMarking', ({ roomCode }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.hostId !== socket.id) {
+        if (callback) callback({ success: false, error: 'No autorizado' });
+        return;
+      }
+      
+      room.isMarkingEnabled = false;
+      emitGameState(roomCode);
+      
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error('Error disabling marking:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
   });
 
-  socket.on('winner', ({ roomCode, playerName }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room) return;
-    const winner = { id: socket.id, name: playerName };
-    if (!room.winners.some(w => w.id === winner.id)) { room.winners.push(winner); }
-    emitGameState(roomCode);
+  // CORREGIDO: Cambiar de 'winner' a 'declareWinner' y agregar callback
+  socket.on('declareWinner', ({ roomCode, playerName }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room) {
+        if (callback) callback({ success: false, error: 'Sala no encontrada' });
+        return;
+      }
+      
+      const winner = { id: socket.id, name: playerName };
+      if (!room.winners.some(w => w.id === winner.id)) { 
+        room.winners.push(winner); 
+      }
+      
+      emitGameState(roomCode);
+      
+      if (callback) callback({ success: true, winner });
+    } catch (error) {
+      console.error('Error declaring winner:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
   });
 
-  socket.on('gameOver', ({ roomCode }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room || room.hostId !== socket.id) return;
-    room.phase = 'gameOver';
-    room.gameOver = true;
-    socket.emit('gameOverConfirmed', { success: true });
-    emitGameState(roomCode);
+  socket.on('gameOver', ({ roomCode }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.hostId !== socket.id) {
+        if (callback) callback({ success: false, error: 'No autorizado' });
+        return;
+      }
+      
+      room.phase = 'gameOver';
+      room.gameOver = true;
+      
+      socket.emit('gameOverConfirmed', { success: true });
+      emitGameState(roomCode);
+      
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error('Error ending game:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
   });
 
-  socket.on('restartGame', ({ roomCode }) => {
-    const room = gameRooms.get(roomCode);
-    if (!room || room.hostId !== socket.id) return;
-    room.phase = 'wheel';
-    room.currentCard = null;
-    room.currentCategory = null;
-    room.isMarkingEnabled = false;
-    room.songPlaying = false;
-    room.winners = [];
-    room.gameOver = false;
-    room.players.forEach(p => { p.isCorrect = false; p.ready = p.isHost; });
-    socket.emit('gameRestarted', { success: true });
-    emitGameState(roomCode);
+  socket.on('restartGame', ({ roomCode }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room || room.hostId !== socket.id) {
+        if (callback) callback({ success: false, error: 'No autorizado' });
+        return;
+      }
+      
+      room.phase = 'wheel';
+      room.currentCard = null;
+      room.currentCategory = null;
+      room.isMarkingEnabled = false;
+      room.songPlaying = false;
+      room.winners = [];
+      room.gameOver = false;
+      room.players.forEach(p => { 
+        p.isCorrect = false; 
+        p.ready = p.isHost; 
+      });
+      
+      socket.emit('gameRestarted', { success: true });
+      emitGameState(roomCode);
+      
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error('Error restarting game:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
   });
   
   socket.on('disconnect', () => {
@@ -250,7 +427,10 @@ io.on('connection', (socket) => {
 setInterval(() => {
   const now = new Date();
   for (const [roomCode, room] of gameRooms.entries()) {
-    if (now - room.createdAt > 3600000) { gameRooms.delete(roomCode); console.log(`Sala ${roomCode} eliminada.`); }
+    if (now - room.createdAt > 3600000) { 
+      gameRooms.delete(roomCode); 
+      console.log(`Sala ${roomCode} eliminada.`); 
+    }
   }
 }, 600000);
 
