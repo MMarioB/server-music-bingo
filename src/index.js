@@ -43,6 +43,9 @@ const io = new Server(httpServer, {
 });
 
 const gameRooms = new Map();
+// NUEVO: Almacenar salas "huérfanas" temporalmente
+const orphanedRooms = new Map();
+const ORPHAN_TIMEOUT = 30000; // 30 segundos para que el host se reconecte
 
 const emitGameState = (roomCode) => {
   const room = gameRooms.get(roomCode);
@@ -100,10 +103,32 @@ io.on('connection', (socket) => {
     }
   });
 
-  // MODIFICADO: Manejo mejorado de reconexión de hosts
+  // MODIFICADO: Manejo mejorado de reconexión de hosts con salas huérfanas
   socket.on('joinRoom', ({ roomCode, name, isHost, reconnecting }, callback) => {
     try {
-      const room = gameRooms.get(roomCode);
+      let room = gameRooms.get(roomCode);
+      
+      // NUEVO: Si no existe en activas, buscar en huérfanas
+      if (!room && isHost && reconnecting) {
+        const orphanedRoom = orphanedRooms.get(roomCode);
+        if (orphanedRoom) {
+          console.log(`🔄 Restaurando sala huérfana ${roomCode} para host ${socket.id}`);
+          
+          // Restaurar sala de huérfanas a activas
+          room = { ...orphanedRoom };
+          delete room.orphanedAt;
+          room.hostId = socket.id; // IMPORTANTE: Actualizar hostId
+          
+          gameRooms.set(roomCode, room);
+          orphanedRooms.delete(roomCode);
+          
+          // Notificar a jugadores que el host volvió
+          socket.to(roomCode).emit('hostReconnected', { 
+            message: 'El anfitrión se ha reconectado' 
+          });
+        }
+      }
+      
       if (!room) {
         callback({ error: 'Sala no encontrada' });
         return;
@@ -482,15 +507,42 @@ io.on('connection', (socket) => {
     }
   });
   
+  // MODIFICADO: Nueva lógica de disconnect con persistencia para hosts
   socket.on('disconnect', () => {
     console.log('Cliente desconectado:', socket.id);
+    
     for (const [roomCode, room] of gameRooms.entries()) {
       if (room.hostId === socket.id) {
-        io.to(roomCode).emit('error', { message: 'El anfitrión se ha desconectado.'});
+        console.log(`🔄 Host desconectado de sala ${roomCode}. Dando 30s para reconexión...`);
+        
+        // NUEVO: No borrar inmediatamente, mover a "huérfanas"
+        orphanedRooms.set(roomCode, {
+          ...room,
+          orphanedAt: new Date()
+        });
+        
         gameRooms.delete(roomCode);
-        console.log(`Sala ${roomCode} cerrada.`);
+        
+        // Notificar a jugadores que el host se desconectó
+        io.to(roomCode).emit('hostDisconnected', { 
+          message: 'El anfitrión se desconectó. Esperando reconexión...' 
+        });
+        
+        // NUEVO: Timer para limpiar sala huérfana
+        setTimeout(() => {
+          if (orphanedRooms.has(roomCode)) {
+            console.log(`💀 Sala huérfana ${roomCode} eliminada definitivamente`);
+            orphanedRooms.delete(roomCode);
+            io.to(roomCode).emit('error', { 
+              message: 'La sesión ha expirado. El anfitrión no se reconectó.' 
+            });
+          }
+        }, ORPHAN_TIMEOUT);
+        
         return;
       }
+      
+      // Jugadores regulares (sin cambios)
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
       if (playerIndex > -1) {
         room.players.splice(playerIndex, 1);
@@ -501,18 +553,33 @@ io.on('connection', (socket) => {
   });
 });
 
+// MODIFICADO: Limpiar tanto salas activas como huérfanas
 setInterval(() => {
   const now = new Date();
+  
+  // Limpiar salas activas viejas (existente)
   for (const [roomCode, room] of gameRooms.entries()) {
     if (now - room.createdAt > 3600000) { 
       gameRooms.delete(roomCode); 
-      console.log(`Sala ${roomCode} eliminada.`); 
+      console.log(`Sala activa ${roomCode} eliminada por inactividad.`); 
+    }
+  }
+  
+  // NUEVO: Limpiar salas huérfanas expiradas
+  for (const [roomCode, room] of orphanedRooms.entries()) {
+    if (now - room.orphanedAt > ORPHAN_TIMEOUT) {
+      orphanedRooms.delete(roomCode);
+      console.log(`Sala huérfana ${roomCode} eliminada por timeout.`);
     }
   }
 }, 600000);
 
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', rooms: gameRooms.size });
+  res.status(200).json({ 
+    status: 'ok', 
+    rooms: gameRooms.size,
+    orphanedRooms: orphanedRooms.size 
+  });
 });
 
 const PORT = process.env.PORT || 3001;
