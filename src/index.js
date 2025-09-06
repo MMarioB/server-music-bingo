@@ -100,7 +100,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('joinRoom', ({ roomCode, name, isHost }, callback) => {
+  // MODIFICADO: Manejo mejorado de reconexión de hosts
+  socket.on('joinRoom', ({ roomCode, name, isHost, reconnecting }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
       if (!room) {
@@ -109,14 +110,50 @@ io.on('connection', (socket) => {
       }
       
       socket.join(roomCode);
-      const existingPlayer = room.players.find(p => p.id === socket.id);
-      if (!existingPlayer && !isHost) {
-        room.players.push({ id: socket.id, name, isHost: false, ready: false, isCorrect: false });
+      
+      // Si es un host reconectándose, actualizar el hostId
+      if (isHost && reconnecting) {
+        console.log(`[DEBUG] Host reconectándose: ${socket.id} para sala ${roomCode}. Anterior hostId: ${room.hostId}`);
+        room.hostId = socket.id;
+        
+        // Actualizar el jugador host existente
+        const hostPlayer = room.players.find(p => p.isHost);
+        if (hostPlayer) {
+          console.log(`[DEBUG] Actualizando hostPlayer existente. ID anterior: ${hostPlayer.id}, Nuevo ID: ${socket.id}`);
+          hostPlayer.id = socket.id;
+        } else {
+          // Si no existe, crear el jugador host
+          console.log(`[DEBUG] Creando nuevo hostPlayer para socket ${socket.id}`);
+          room.players.unshift({ 
+            id: socket.id, 
+            name: name || 'Game Master', 
+            isHost: true, 
+            ready: true 
+          });
+        }
+      } else {
+        // Lógica existente para jugadores regulares
+        const existingPlayer = room.players.find(p => p.id === socket.id);
+        if (!existingPlayer && !isHost) {
+          room.players.push({ 
+            id: socket.id, 
+            name, 
+            isHost: false, 
+            ready: false, 
+            isCorrect: false 
+          });
+        }
       }
       
-      const response = { roomCode, players: room.players, difficulty: room.config.difficulty, gameStep: room.phase };
-      callback(response); // SOLO CALLBACK
+      const response = { 
+        roomCode, 
+        players: room.players, 
+        difficulty: room.config.difficulty, 
+        gameStep: room.phase 
+      };
+      callback(response);
       emitGameState(roomCode);
+      
     } catch (error) {
       console.error('Error joining room:', error);
       callback({ error: error.message });
@@ -236,13 +273,23 @@ io.on('connection', (socket) => {
   socket.on('markPlayerCorrect', ({ roomCode, playerId }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
-      if (!room || room.hostId !== socket.id || room.phase !== 'reviewing') {
+      console.log(`[DEBUG] markPlayerCorrect - RoomCode: ${roomCode}, SocketId: ${socket.id}, HostId: ${room?.hostId}, Room exists: ${!!room}`);
+      
+      if (!room) {
+        console.log(`[DEBUG] markPlayerCorrect - Sala no encontrada: ${roomCode}`);
+        callback({ error: 'Sala no encontrada' });
+        return;
+      }
+      
+      if (room.hostId !== socket.id || room.phase !== 'reviewing') {
+        console.log(`[DEBUG] markPlayerCorrect - No autorizado o fase incorrecta. Expected hostId: ${room.hostId}, Got: ${socket.id}, Phase: ${room.phase}`);
         callback({ error: 'No autorizado o fase incorrecta' });
         return;
       }
       
       const player = room.players.find(p => p.id === playerId);
       if (!player) {
+        console.log(`[DEBUG] markPlayerCorrect - Jugador no encontrado: ${playerId}`);
         callback({ error: 'Jugador no encontrado' });
         return;
       }
@@ -257,10 +304,20 @@ io.on('connection', (socket) => {
     }
   });
 
+  // MODIFICADO: Logging de depuración agregado
   socket.on('enableMarking', ({ roomCode }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
-      if (!room || room.hostId !== socket.id) {
+      console.log(`[DEBUG] enableMarking - RoomCode: ${roomCode}, SocketId: ${socket.id}, HostId: ${room?.hostId}, Room exists: ${!!room}`);
+      
+      if (!room) {
+        console.log(`[DEBUG] enableMarking - Sala no encontrada: ${roomCode}`);
+        callback({ error: 'Sala no encontrada' });
+        return;
+      }
+      
+      if (room.hostId !== socket.id) {
+        console.log(`[DEBUG] enableMarking - No autorizado. Expected: ${room.hostId}, Got: ${socket.id}`);
         callback({ error: 'No autorizado' });
         return;
       }
@@ -268,6 +325,7 @@ io.on('connection', (socket) => {
       room.isMarkingEnabled = true;
       emitGameState(roomCode);
       
+      console.log(`[DEBUG] enableMarking - Éxito para sala ${roomCode}`);
       callback({ success: true });
     } catch (error) {
       console.error('Error enabling marking:', error);
@@ -275,10 +333,20 @@ io.on('connection', (socket) => {
     }
   });
   
+  // MODIFICADO: Logging de depuración agregado
   socket.on('disableMarking', ({ roomCode }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
-      if (!room || room.hostId !== socket.id) {
+      console.log(`[DEBUG] disableMarking - RoomCode: ${roomCode}, SocketId: ${socket.id}, HostId: ${room?.hostId}, Room exists: ${!!room}`);
+      
+      if (!room) {
+        console.log(`[DEBUG] disableMarking - Sala no encontrada: ${roomCode}`);
+        callback({ error: 'Sala no encontrada' });
+        return;
+      }
+      
+      if (room.hostId !== socket.id) {
+        console.log(`[DEBUG] disableMarking - No autorizado. Expected: ${room.hostId}, Got: ${socket.id}`);
         callback({ error: 'No autorizado' });
         return;
       }
@@ -286,9 +354,32 @@ io.on('connection', (socket) => {
       room.isMarkingEnabled = false;
       emitGameState(roomCode);
       
+      console.log(`[DEBUG] disableMarking - Éxito para sala ${roomCode}`);
       callback({ success: true });
     } catch (error) {
       console.error('Error disabling marking:', error);
+      callback({ error: error.message });
+    }
+  });
+
+  socket.on('declareWinner', ({ roomCode, playerName }, callback) => {
+    try {
+      const room = gameRooms.get(roomCode);
+      if (!room) {
+        callback({ error: 'Sala no encontrada' });
+        return;
+      }
+      
+      const winner = { id: socket.id, name: playerName };
+      if (!room.winners.some(w => w.id === winner.id)) { 
+        room.winners.push(winner); 
+        console.log(`[DEBUG] Ganador declarado: ${playerName} (${socket.id}) en sala ${roomCode}`);
+      }
+      
+      callback({ success: true });
+      emitGameState(roomCode);
+    } catch (error) {
+      console.error('Error declaring winner:', error);
       callback({ error: error.message });
     }
   });
@@ -312,7 +403,16 @@ io.on('connection', (socket) => {
   socket.on('gameOver', ({ roomCode }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
-      if (!room || room.hostId !== socket.id) {
+      console.log(`[DEBUG] gameOver - RoomCode: ${roomCode}, SocketId: ${socket.id}, HostId: ${room?.hostId}, Room exists: ${!!room}`);
+      
+      if (!room) {
+        console.log(`[DEBUG] gameOver - Sala no encontrada: ${roomCode}`);
+        callback({ error: 'Sala no encontrada' });
+        return;
+      }
+      
+      if (room.hostId !== socket.id) {
+        console.log(`[DEBUG] gameOver - No autorizado. Expected: ${room.hostId}, Got: ${socket.id}`);
         callback({ error: 'No autorizado' });
         return;
       }
@@ -320,6 +420,7 @@ io.on('connection', (socket) => {
       room.phase = 'gameOver';
       room.gameOver = true;
       
+      console.log(`[DEBUG] gameOver - Éxito para sala ${roomCode}`);
       callback({ success: true });
       emitGameState(roomCode);
     } catch (error) {
@@ -331,7 +432,16 @@ io.on('connection', (socket) => {
   socket.on('restartGame', ({ roomCode }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
-      if (!room || room.hostId !== socket.id) {
+      console.log(`[DEBUG] restartGame - RoomCode: ${roomCode}, SocketId: ${socket.id}, HostId: ${room?.hostId}, Room exists: ${!!room}`);
+      
+      if (!room) {
+        console.log(`[DEBUG] restartGame - Sala no encontrada: ${roomCode}`);
+        callback({ error: 'Sala no encontrada' });
+        return;
+      }
+      
+      if (room.hostId !== socket.id) {
+        console.log(`[DEBUG] restartGame - No autorizado. Expected: ${room.hostId}, Got: ${socket.id}`);
         callback({ error: 'No autorizado' });
         return;
       }
@@ -348,6 +458,7 @@ io.on('connection', (socket) => {
         p.ready = p.isHost; 
       });
       
+      console.log(`[DEBUG] restartGame - Éxito para sala ${roomCode}`);
       callback({ success: true });
       emitGameState(roomCode);
     } catch (error) {
