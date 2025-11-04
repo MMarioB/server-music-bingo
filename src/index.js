@@ -65,6 +65,7 @@ const emitGameState = (roomCode) => {
     }, {}),
     winners: room.winners,
     gameOver: room.gameOver,
+    difficulty: room.config?.difficulty || 'principiante',
   };
   
   io.to(roomCode).emit('gameStateUpdate', gameState);
@@ -170,11 +171,12 @@ io.on('connection', (socket) => {
         }
       }
       
-      const response = { 
-        roomCode, 
-        players: room.players, 
-        difficulty: room.config.difficulty, 
-        gameStep: room.phase 
+      const response = {
+        roomCode,
+        players: room.players,
+        config: room.config,
+        difficulty: room.config?.difficulty || 'principiante',
+        gameStep: room.phase
       };
       callback(response);
       emitGameState(roomCode);
@@ -492,19 +494,15 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('updateRoom', ({ roomCode, data }) => {
-    try {
-      const room = gameRooms.get(roomCode);
-      if (!room) return;
-      
-      if (data) {
-        Object.assign(room, data);
-      }
-      
-      emitGameState(roomCode);
-    } catch (error) {
-      console.error('Error updating room:', error);
+  socket.on('updateRoom', ({ roomCode, difficulty }) => {
+    const room = gameRooms.get(roomCode);
+    if (!room) return;
+  
+    if (difficulty !== undefined) {
+      room.config.difficulty = difficulty;
     }
+  
+    emitGameState(roomCode);  // Ahora emite con difficulty incluida
   });
   
   // MODIFICADO: Nueva lógica de disconnect con persistencia para hosts
