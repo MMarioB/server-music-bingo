@@ -3,7 +3,21 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import rateLimit from 'express-rate-limit';
 dotenv.config();
+
+// ==== CONFIGURACIÓN DE SEGURIDAD ====
+const SECURITY_CONFIG = {
+  MAX_ROOMS: 50,                    // Máximo de salas activas
+  MAX_PLAYERS_PER_ROOM: 50,        // Máximo de jugadores por sala
+  MAX_ROOM_LIFETIME: 3600000,      // 1 hora en ms
+  ORPHAN_TIMEOUT: 30000,           // 30 segundos para reconexión
+  MAX_NAME_LENGTH: 30,              // Longitud máxima de nombre
+  MAX_ROOM_CODE_LENGTH: 10,         // Longitud máxima de código de sala
+  CONNECTION_COOLDOWN: 1000,        // 1 segundo entre conexiones del mismo IP
+  MAX_EVENTS_PER_MINUTE: 60,        // Máximo de eventos por minuto por socket
+  CLEANUP_INTERVAL: 300000,         // 5 minutos entre limpiezas
+};
 
 const app = express();
 const allowedOrigins = [
@@ -13,6 +27,16 @@ const allowedOrigins = [
   process.env.FRONTEND_URL
 ].filter(Boolean);
 
+// Rate limiter para HTTP endpoints
+const httpLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 100, // 100 requests por minuto
+  message: 'Demasiadas peticiones desde esta IP, intenta de nuevo más tarde',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use(httpLimiter);
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -43,9 +67,12 @@ const io = new Server(httpServer, {
 });
 
 const gameRooms = new Map();
-// NUEVO: Almacenar salas "huérfanas" temporalmente
 const orphanedRooms = new Map();
-const ORPHAN_TIMEOUT = 30000; // 30 segundos para que el host se reconecte
+
+// ==== PROTECCIÓN ANTI-ABUSE ====
+const connectionTracker = new Map(); // IP -> { count, timestamp }
+const socketEventTracker = new Map(); // socketId -> { events: [], resetTime }
+const suspiciousIPs = new Set(); // IPs bloqueadas temporalmente
 
 // Función auxiliar para seleccionar un tema aleatorio
 const selectRandomTheme = (availableThemes) => {
@@ -54,6 +81,75 @@ const selectRandomTheme = (availableThemes) => {
   }
   const randomIndex = Math.floor(Math.random() * availableThemes.length);
   return availableThemes[randomIndex];
+};
+
+// Validación de entrada
+const sanitizeString = (str, maxLength) => {
+  if (typeof str !== 'string') return '';
+  return str.trim().slice(0, maxLength).replace(/[<>]/g, '');
+};
+
+// Verificar si un socket está haciendo demasiados eventos
+const checkEventRate = (socketId) => {
+  const now = Date.now();
+  const tracker = socketEventTracker.get(socketId);
+
+  if (!tracker) {
+    socketEventTracker.set(socketId, { events: [now], resetTime: now + 60000 });
+    return true;
+  }
+
+  // Resetear si pasó 1 minuto
+  if (now > tracker.resetTime) {
+    socketEventTracker.set(socketId, { events: [now], resetTime: now + 60000 });
+    return true;
+  }
+
+  // Filtrar eventos del último minuto
+  tracker.events = tracker.events.filter(t => now - t < 60000);
+
+  if (tracker.events.length >= SECURITY_CONFIG.MAX_EVENTS_PER_MINUTE) {
+    console.log(`⚠️ [SECURITY] Socket ${socketId} excedió límite de eventos (${tracker.events.length})`);
+    return false;
+  }
+
+  tracker.events.push(now);
+  return true;
+};
+
+// Verificar límite de conexiones por IP
+const checkConnectionRate = (ip) => {
+  if (suspiciousIPs.has(ip)) {
+    console.log(`🚫 [SECURITY] IP bloqueada intentando conectar: ${ip}`);
+    return false;
+  }
+
+  const now = Date.now();
+  const tracker = connectionTracker.get(ip);
+
+  if (!tracker) {
+    connectionTracker.set(ip, { count: 1, timestamp: now });
+    return true;
+  }
+
+  // Resetear contador si pasó suficiente tiempo
+  if (now - tracker.timestamp > SECURITY_CONFIG.CONNECTION_COOLDOWN) {
+    connectionTracker.set(ip, { count: 1, timestamp: now });
+    return true;
+  }
+
+  // Incrementar contador
+  tracker.count++;
+
+  // Si excede 10 conexiones en 1 segundo, bloquear temporalmente
+  if (tracker.count > 10) {
+    console.log(`🚫 [SECURITY] IP bloqueada por flood: ${ip}`);
+    suspiciousIPs.add(ip);
+    setTimeout(() => suspiciousIPs.delete(ip), 60000); // Desbloquear en 1 minuto
+    return false;
+  }
+
+  return true;
 };
 
 const emitGameState = (roomCode) => {
@@ -84,17 +180,61 @@ const emitGameState = (roomCode) => {
 };
 
 io.on('connection', (socket) => {
-  console.log('Cliente conectado:', socket.id);
+  const clientIP = socket.handshake.address;
+  console.log('Cliente conectado:', socket.id, 'IP:', clientIP);
+
+  // Verificar rate limiting de conexión
+  if (!checkConnectionRate(clientIP)) {
+    console.log(`🚫 [SECURITY] Conexión rechazada por rate limiting: ${clientIP}`);
+    socket.emit('error', { message: 'Demasiadas conexiones. Intenta de nuevo más tarde.' });
+    socket.disconnect(true);
+    return;
+  }
 
   // PATRÓN UNIFICADO: Solo usar callbacks, NO eventos separados
   socket.on('createRoom', (config, callback) => {
     try {
-      const roomCode = config.roomCode || Math.random().toString(36).substring(2, 7).toUpperCase();
+      // Verificar rate limiting de eventos
+      if (!checkEventRate(socket.id)) {
+        if (callback) callback({ error: 'Demasiadas peticiones. Espera un momento.' });
+        return;
+      }
+
+      // Validar límite de salas
+      if (gameRooms.size >= SECURITY_CONFIG.MAX_ROOMS) {
+        console.log(`⚠️ [SECURITY] Límite de salas alcanzado (${gameRooms.size}/${SECURITY_CONFIG.MAX_ROOMS})`);
+        if (callback) callback({ error: 'Servidor lleno. Intenta de nuevo más tarde.' });
+        return;
+      }
+
+      // Validar y sanitizar roomCode
+      let roomCode = config.roomCode
+        ? sanitizeString(config.roomCode, SECURITY_CONFIG.MAX_ROOM_CODE_LENGTH).toUpperCase()
+        : Math.random().toString(36).substring(2, 7).toUpperCase();
+
+      // Verificar que el roomCode no exista
+      if (gameRooms.has(roomCode)) {
+        console.log(`⚠️ [SECURITY] Intento de crear sala existente: ${roomCode}`);
+        if (callback) callback({ error: 'Código de sala ya existe' });
+        return;
+      }
+
+      // Validar configuración
+      const validatedConfig = {
+        ...config,
+        difficulty: ['principiante', 'intermedio', 'experto'].includes(config.difficulty)
+          ? config.difficulty
+          : 'principiante',
+        musicThemes: Array.isArray(config.musicThemes)
+          ? config.musicThemes.filter(t => typeof t === 'string').slice(0, 10)
+          : [],
+      };
+
       const hostPlayer = { id: socket.id, name: 'Game Master', isHost: true, ready: true };
       gameRooms.set(roomCode, {
         hostId: socket.id,
         players: [hostPlayer],
-        config,
+        config: validatedConfig,
         phase: 'waiting',
         currentCard: null,
         currentCategory: null,
@@ -106,52 +246,74 @@ io.on('connection', (socket) => {
         createdAt: new Date(),
       });
       socket.join(roomCode);
-      console.log(`Sala creada: ${roomCode} por ${socket.id}`);
+      console.log(`✅ [ROOM] Sala creada: ${roomCode} por ${socket.id} (Total: ${gameRooms.size})`);
 
-      const response = { roomCode, players: [hostPlayer], config };
-      if (callback) callback(response); // SOLO CALLBACK
+      const response = { roomCode, players: [hostPlayer], config: validatedConfig };
+      if (callback) callback(response);
     } catch (error) {
       console.error('Error creating room:', error);
-      if (callback) callback({ error: error.message });
+      if (callback) callback({ error: 'Error al crear la sala' });
     }
   });
 
   // MODIFICADO: Manejo mejorado de reconexión de hosts con salas huérfanas
   socket.on('joinRoom', ({ roomCode, name, isHost, reconnecting }, callback) => {
     try {
-      let room = gameRooms.get(roomCode);
-      
+      // Verificar rate limiting de eventos
+      if (!checkEventRate(socket.id)) {
+        if (callback) callback({ error: 'Demasiadas peticiones. Espera un momento.' });
+        return;
+      }
+
+      // Validar y sanitizar inputs
+      const sanitizedRoomCode = sanitizeString(roomCode, SECURITY_CONFIG.MAX_ROOM_CODE_LENGTH).toUpperCase();
+      const sanitizedName = sanitizeString(name, SECURITY_CONFIG.MAX_NAME_LENGTH);
+
+      if (!sanitizedRoomCode) {
+        if (callback) callback({ error: 'Código de sala inválido' });
+        return;
+      }
+
+      let room = gameRooms.get(sanitizedRoomCode);
+
       // NUEVO: Si no existe en activas, buscar en huérfanas
       if (!room && isHost && reconnecting) {
-        const orphanedRoom = orphanedRooms.get(roomCode);
+        const orphanedRoom = orphanedRooms.get(sanitizedRoomCode);
         if (orphanedRoom) {
-          console.log(`🔄 Restaurando sala huérfana ${roomCode} para host ${socket.id}`);
-          
+          console.log(`🔄 Restaurando sala huérfana ${sanitizedRoomCode} para host ${socket.id}`);
+
           // Restaurar sala de huérfanas a activas
           room = { ...orphanedRoom };
           delete room.orphanedAt;
           room.hostId = socket.id; // IMPORTANTE: Actualizar hostId
-          
-          gameRooms.set(roomCode, room);
-          orphanedRooms.delete(roomCode);
-          
+
+          gameRooms.set(sanitizedRoomCode, room);
+          orphanedRooms.delete(sanitizedRoomCode);
+
           // Notificar a jugadores que el host volvió
-          socket.to(roomCode).emit('hostReconnected', { 
-            message: 'El anfitrión se ha reconectado' 
+          socket.to(sanitizedRoomCode).emit('hostReconnected', {
+            message: 'El anfitrión se ha reconectado'
           });
         }
       }
-      
+
       if (!room) {
         if (callback) callback({ error: 'Sala no encontrada' });
         return;
       }
 
-      socket.join(roomCode);
+      // Validar límite de jugadores
+      if (!isHost && !reconnecting && room.players.length >= SECURITY_CONFIG.MAX_PLAYERS_PER_ROOM) {
+        console.log(`⚠️ [SECURITY] Límite de jugadores alcanzado en sala ${sanitizedRoomCode}`);
+        if (callback) callback({ error: 'Sala llena' });
+        return;
+      }
+
+      socket.join(sanitizedRoomCode);
 
       // Si es un host reconectándose, actualizar el hostId
       if (isHost && reconnecting) {
-        console.log(`[DEBUG] Host reconectándose: ${socket.id} para sala ${roomCode}. Anterior hostId: ${room.hostId}`);
+        console.log(`[DEBUG] Host reconectándose: ${socket.id} para sala ${sanitizedRoomCode}. Anterior hostId: ${room.hostId}`);
         room.hostId = socket.id;
 
         // Actualizar el jugador host existente
@@ -164,7 +326,7 @@ io.on('connection', (socket) => {
           console.log(`[DEBUG] Creando nuevo hostPlayer para socket ${socket.id}`);
           room.players.unshift({
             id: socket.id,
-            name: name || 'Game Master',
+            name: sanitizedName || 'Game Master',
             isHost: true,
             ready: true
           });
@@ -175,16 +337,17 @@ io.on('connection', (socket) => {
         if (!existingPlayer && !isHost) {
           room.players.push({
             id: socket.id,
-            name,
+            name: sanitizedName,
             isHost: false,
             ready: false,
             isCorrect: false
           });
+          console.log(`✅ [PLAYER] Jugador ${sanitizedName} unido a sala ${sanitizedRoomCode} (Total: ${room.players.length})`);
         }
       }
-      
+
       const response = {
-        roomCode,
+        roomCode: sanitizedRoomCode,
         players: room.players,
         config: room.config,
         difficulty: room.config?.difficulty || 'principiante',
@@ -192,11 +355,11 @@ io.on('connection', (socket) => {
         gameStep: room.phase
       };
       if (callback) callback(response);
-      emitGameState(roomCode);
+      emitGameState(sanitizedRoomCode);
 
     } catch (error) {
       console.error('Error joining room:', error);
-      if (callback) callback({ error: error.message });
+      if (callback) callback({ error: 'Error al unirse a la sala' });
     }
   });
   
@@ -534,38 +697,41 @@ io.on('connection', (socket) => {
   // MODIFICADO: Nueva lógica de disconnect con persistencia para hosts
   socket.on('disconnect', () => {
     console.log('Cliente desconectado:', socket.id);
-    
+
+    // Limpiar tracker de eventos del socket
+    socketEventTracker.delete(socket.id);
+
     for (const [roomCode, room] of gameRooms.entries()) {
       if (room.hostId === socket.id) {
         console.log(`🔄 Host desconectado de sala ${roomCode}. Dando 30s para reconexión...`);
-        
+
         // NUEVO: No borrar inmediatamente, mover a "huérfanas"
         orphanedRooms.set(roomCode, {
           ...room,
           orphanedAt: new Date()
         });
-        
+
         gameRooms.delete(roomCode);
-        
+
         // Notificar a jugadores que el host se desconectó
-        io.to(roomCode).emit('hostDisconnected', { 
-          message: 'El anfitrión se desconectó. Esperando reconexión...' 
+        io.to(roomCode).emit('hostDisconnected', {
+          message: 'El anfitrión se desconectó. Esperando reconexión...'
         });
-        
+
         // NUEVO: Timer para limpiar sala huérfana
         setTimeout(() => {
           if (orphanedRooms.has(roomCode)) {
             console.log(`💀 Sala huérfana ${roomCode} eliminada definitivamente`);
             orphanedRooms.delete(roomCode);
-            io.to(roomCode).emit('error', { 
-              message: 'La sesión ha expirado. El anfitrión no se reconectó.' 
+            io.to(roomCode).emit('error', {
+              message: 'La sesión ha expirado. El anfitrión no se reconectó.'
             });
           }
-        }, ORPHAN_TIMEOUT);
-        
+        }, SECURITY_CONFIG.ORPHAN_TIMEOUT);
+
         return;
       }
-      
+
       // Jugadores regulares (sin cambios)
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
       if (playerIndex > -1) {
@@ -577,36 +743,86 @@ io.on('connection', (socket) => {
   });
 });
 
-// MODIFICADO: Limpiar tanto salas activas como huérfanas
+// MODIFICADO: Limpiar tanto salas activas como huérfanas y trackers
 setInterval(() => {
   const now = new Date();
-  
-  // Limpiar salas activas viejas (existente)
+
+  // Limpiar salas activas viejas
   for (const [roomCode, room] of gameRooms.entries()) {
-    if (now - room.createdAt > 3600000) { 
-      gameRooms.delete(roomCode); 
-      console.log(`Sala activa ${roomCode} eliminada por inactividad.`); 
+    if (now - room.createdAt > SECURITY_CONFIG.MAX_ROOM_LIFETIME) {
+      gameRooms.delete(roomCode);
+      console.log(`🧹 [CLEANUP] Sala activa ${roomCode} eliminada por inactividad.`);
     }
   }
-  
-  // NUEVO: Limpiar salas huérfanas expiradas
+
+  // Limpiar salas huérfanas expiradas
   for (const [roomCode, room] of orphanedRooms.entries()) {
-    if (now - room.orphanedAt > ORPHAN_TIMEOUT) {
+    if (now - room.orphanedAt > SECURITY_CONFIG.ORPHAN_TIMEOUT) {
       orphanedRooms.delete(roomCode);
-      console.log(`Sala huérfana ${roomCode} eliminada por timeout.`);
+      console.log(`🧹 [CLEANUP] Sala huérfana ${roomCode} eliminada por timeout.`);
     }
   }
-}, 600000);
+
+  // Limpiar trackers de conexión antiguos
+  for (const [ip, tracker] of connectionTracker.entries()) {
+    if (now - tracker.timestamp > 300000) { // 5 minutos
+      connectionTracker.delete(ip);
+    }
+  }
+
+  // Limpiar trackers de eventos antiguos
+  for (const [socketId, tracker] of socketEventTracker.entries()) {
+    if (now > tracker.resetTime + 300000) { // 5 minutos después del reset
+      socketEventTracker.delete(socketId);
+    }
+  }
+
+  // Log de estado del servidor
+  console.log(`📊 [STATUS] Salas activas: ${gameRooms.size}, Huérfanas: ${orphanedRooms.size}, IPs tracked: ${connectionTracker.size}, Sockets tracked: ${socketEventTracker.size}`);
+}, SECURITY_CONFIG.CLEANUP_INTERVAL);
 
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok', 
-    rooms: gameRooms.size,
-    orphanedRooms: orphanedRooms.size 
+  const totalPlayers = Array.from(gameRooms.values())
+    .reduce((sum, room) => sum + room.players.length, 0);
+
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    rooms: {
+      active: gameRooms.size,
+      orphaned: orphanedRooms.size,
+      max: SECURITY_CONFIG.MAX_ROOMS,
+    },
+    players: {
+      total: totalPlayers,
+      maxPerRoom: SECURITY_CONFIG.MAX_PLAYERS_PER_ROOM,
+    },
+    security: {
+      trackedIPs: connectionTracker.size,
+      trackedSockets: socketEventTracker.size,
+      blockedIPs: suspiciousIPs.size,
+    },
   });
 });
 
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`Servidor escuchando en puerto ${PORT}`);
+  console.log(`
+╔════════════════════════════════════════════════════════╗
+║       🎵 Music Bingo Server - PROTEGIDO 🔒           ║
+╚════════════════════════════════════════════════════════╝
+
+  Puerto: ${PORT}
+
+  🛡️  Configuración de Seguridad:
+  ├─ Salas máximas: ${SECURITY_CONFIG.MAX_ROOMS}
+  ├─ Jugadores por sala: ${SECURITY_CONFIG.MAX_PLAYERS_PER_ROOM}
+  ├─ Rate limit HTTP: 100 req/min
+  ├─ Rate limit WebSocket: ${SECURITY_CONFIG.MAX_EVENTS_PER_MINUTE} eventos/min
+  ├─ Cooldown de conexión: ${SECURITY_CONFIG.CONNECTION_COOLDOWN}ms
+  ├─ Limpieza automática: cada ${SECURITY_CONFIG.CLEANUP_INTERVAL / 1000}s
+  └─ Tiempo de vida máximo: ${SECURITY_CONFIG.MAX_ROOM_LIFETIME / 60000} min
+
+  ✅ Servidor listo y protegido contra abuse!
+  `);
 });
