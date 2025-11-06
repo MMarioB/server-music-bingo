@@ -47,6 +47,15 @@ const gameRooms = new Map();
 const orphanedRooms = new Map();
 const ORPHAN_TIMEOUT = 30000; // 30 segundos para que el host se reconecte
 
+// Función auxiliar para seleccionar un tema aleatorio
+const selectRandomTheme = (availableThemes) => {
+  if (!availableThemes || availableThemes.length === 0) {
+    return null;
+  }
+  const randomIndex = Math.floor(Math.random() * availableThemes.length);
+  return availableThemes[randomIndex];
+};
+
 const emitGameState = (roomCode) => {
   const room = gameRooms.get(roomCode);
   if (!room) return;
@@ -66,6 +75,8 @@ const emitGameState = (roomCode) => {
     winners: room.winners,
     gameOver: room.gameOver,
     difficulty: room.config?.difficulty || 'principiante',
+    musicThemes: room.config?.musicThemes || [],
+    currentTheme: room.currentTheme || null,
   };
   
   io.to(roomCode).emit('gameStateUpdate', gameState);
@@ -87,6 +98,7 @@ io.on('connection', (socket) => {
         phase: 'waiting',
         currentCard: null,
         currentCategory: null,
+        currentTheme: null,
         isMarkingEnabled: false,
         songPlaying: false,
         winners: [],
@@ -176,6 +188,7 @@ io.on('connection', (socket) => {
         players: room.players,
         config: room.config,
         difficulty: room.config?.difficulty || 'principiante',
+        musicThemes: room.config?.musicThemes || [],
         gameStep: room.phase
       };
       if (callback) callback(response);
@@ -228,6 +241,7 @@ io.on('connection', (socket) => {
 
       room.phase = 'card';
       room.currentCategory = category;
+      room.currentTheme = null;
       room.isMarkingEnabled = false;
       room.songPlaying = false;
       room.currentCard = null;
@@ -241,7 +255,7 @@ io.on('connection', (socket) => {
     }
   });
   
-  socket.on('startSong', ({ roomCode, track }, callback) => {
+  socket.on('startSong', ({ roomCode, track, theme }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
       if (!room || room.hostId !== socket.id) {
@@ -249,13 +263,24 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // Determinar el tema a usar
+      let selectedTheme = theme;
+      if (theme === 'random') {
+        const availableThemes = room.config?.musicThemes || [];
+        selectedTheme = selectRandomTheme(availableThemes);
+        console.log(`[THEME] Tema aleatorio seleccionado: ${selectedTheme} de ${availableThemes.join(', ')}`);
+      } else {
+        console.log(`[THEME] Tema específico seleccionado: ${selectedTheme}`);
+      }
+
       room.phase = 'playing';
       room.songPlaying = true;
-      room.currentCard = { ...track, revealed: false };
+      room.currentTheme = selectedTheme;
+      room.currentCard = { ...track, revealed: false, theme: selectedTheme };
       room.isMarkingEnabled = false;
       room.players.forEach(p => p.isCorrect = false);
 
-      if (callback) callback({ success: true });
+      if (callback) callback({ success: true, theme: selectedTheme });
       emitGameState(roomCode);
     } catch (error) {
       console.error('Error starting song:', error);
@@ -476,6 +501,7 @@ io.on('connection', (socket) => {
       room.phase = 'wheel';
       room.currentCard = null;
       room.currentCategory = null;
+      room.currentTheme = null;
       room.isMarkingEnabled = false;
       room.songPlaying = false;
       room.winners = [];
