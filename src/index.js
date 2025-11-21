@@ -4,28 +4,14 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
+
+// ==== NUEVAS IMPORTACIONES ====
+import { SECURITY_CONFIG, ALLOWED_ORIGINS } from './src/config/constants.js';
+import { sanitizeString, selectRandomTheme } from './src/utils/helpers.js';
+
 dotenv.config();
 
-// ==== CONFIGURACIÓN DE SEGURIDAD ====
-const SECURITY_CONFIG = {
-  MAX_ROOMS: 50,                    // Máximo de salas activas
-  MAX_PLAYERS_PER_ROOM: 50,        // Máximo de jugadores por sala
-  MAX_ROOM_LIFETIME: 3600000,      // 1 hora en ms
-  ORPHAN_TIMEOUT: 30000,           // 30 segundos para reconexión
-  MAX_NAME_LENGTH: 30,              // Longitud máxima de nombre
-  MAX_ROOM_CODE_LENGTH: 10,         // Longitud máxima de código de sala
-  CONNECTION_COOLDOWN: 1000,        // 1 segundo entre conexiones del mismo IP
-  MAX_EVENTS_PER_MINUTE: 60,        // Máximo de eventos por minuto por socket
-  CLEANUP_INTERVAL: 300000,         // 5 minutos entre limpiezas
-};
-
 const app = express();
-const allowedOrigins = [
-  'https://www.discohitsbingo.com',
-  'https://music-bingo-swart.vercel.app',
-  'http://localhost:5173',
-  process.env.FRONTEND_URL
-].filter(Boolean);
 
 // Rate limiter para HTTP endpoints
 const httpLimiter = rateLimit({
@@ -39,7 +25,7 @@ const httpLimiter = rateLimit({
 app.use(httpLimiter);
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
@@ -53,7 +39,7 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
         callback(null, true);
       } else {
         callback(new Error('Not allowed by CORS'));
@@ -66,6 +52,7 @@ const io = new Server(httpServer, {
   pingInterval: 25000,
 });
 
+// Estado en Memoria (Mantenido igual por ahora)
 const gameRooms = new Map();
 const orphanedRooms = new Map();
 
@@ -73,21 +60,6 @@ const orphanedRooms = new Map();
 const connectionTracker = new Map(); // IP -> { count, timestamp }
 const socketEventTracker = new Map(); // socketId -> { events: [], resetTime }
 const suspiciousIPs = new Set(); // IPs bloqueadas temporalmente
-
-// Función auxiliar para seleccionar un tema aleatorio
-const selectRandomTheme = (availableThemes) => {
-  if (!availableThemes || availableThemes.length === 0) {
-    return null;
-  }
-  const randomIndex = Math.floor(Math.random() * availableThemes.length);
-  return availableThemes[randomIndex];
-};
-
-// Validación de entrada
-const sanitizeString = (str, maxLength) => {
-  if (typeof str !== 'string') return '';
-  return str.trim().slice(0, maxLength).replace(/[<>]/g, '');
-};
 
 // Verificar si un socket está haciendo demasiados eventos
 const checkEventRate = (socketId) => {
@@ -155,7 +127,7 @@ const checkConnectionRate = (ip) => {
 const emitGameState = (roomCode) => {
   const room = gameRooms.get(roomCode);
   if (!room) return;
-  
+
   const gameState = {
     gameStep: room.phase,
     connectedPlayers: room.players,
@@ -174,7 +146,7 @@ const emitGameState = (roomCode) => {
     musicThemes: room.config?.musicThemes || [],
     currentTheme: room.currentTheme || null,
   };
-  
+
   io.to(roomCode).emit('gameStateUpdate', gameState);
   console.log(`[STATE UPDATE] Sala ${roomCode} actualizada. Fase: ${room.phase}`);
 };
@@ -256,7 +228,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // MODIFICADO: Manejo mejorado de reconexión de hosts con salas huérfanas
   socket.on('joinRoom', ({ roomCode, name, isHost, reconnecting }, callback) => {
     try {
       // Verificar rate limiting de eventos
@@ -362,12 +333,12 @@ io.on('connection', (socket) => {
       if (callback) callback({ error: 'Error al unirse a la sala' });
     }
   });
-  
+
   socket.on('playerReady', ({ roomCode }) => {
     try {
       const room = gameRooms.get(roomCode);
       if (!room) return;
-      
+
       const player = room.players.find(p => p.id === socket.id);
       if (player) {
         player.ready = true;
@@ -382,10 +353,10 @@ io.on('connection', (socket) => {
     try {
       const room = gameRooms.get(roomCode);
       if (!room || room.hostId !== socket.id) return;
-      
+
       const allPlayersReady = room.players.every(p => p.ready);
       if (!allPlayersReady) return;
-      
+
       room.phase = 'wheel';
       if (difficulty) room.config.difficulty = difficulty;
       emitGameState(roomCode);
@@ -417,7 +388,7 @@ io.on('connection', (socket) => {
       if (callback) callback({ error: error.message });
     }
   });
-  
+
   socket.on('startSong', ({ roomCode, track, theme }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
@@ -450,18 +421,18 @@ io.on('connection', (socket) => {
       if (callback) callback({ error: error.message });
     }
   });
-  
+
   socket.on('submitPrediction', ({ roomCode, prediction }) => {
     try {
       const room = gameRooms.get(roomCode);
       if (!room) return;
-      
+
       const player = room.players.find(p => p.id === socket.id);
       if (!player) return;
-      
-      io.to(room.hostId).emit('playerPrediction', { 
-        playerName: player.name, 
-        prediction: prediction 
+
+      io.to(room.hostId).emit('playerPrediction', {
+        playerName: player.name,
+        prediction: prediction
       });
     } catch (error) {
       console.error('Error submitting prediction:', error);
@@ -472,19 +443,19 @@ io.on('connection', (socket) => {
     try {
       const room = gameRooms.get(roomCode);
       if (!room || room.hostId !== socket.id) return;
-      
+
       room.phase = 'reviewing';
       room.songPlaying = false;
-      if (room.currentCard) { 
-        room.currentCard.revealed = true; 
+      if (room.currentCard) {
+        room.currentCard.revealed = true;
       }
-      
+
       emitGameState(roomCode);
     } catch (error) {
       console.error('Error revealing song:', error);
     }
   });
-  
+
   socket.on('markPlayerCorrect', ({ roomCode, playerId }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
@@ -519,7 +490,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // MODIFICADO: Logging de depuración agregado
   socket.on('enableMarking', ({ roomCode }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
@@ -547,8 +517,7 @@ io.on('connection', (socket) => {
       if (callback) callback({ error: error.message });
     }
   });
-  
-  // MODIFICADO: Logging de depuración agregado
+
   socket.on('disableMarking', ({ roomCode }, callback) => {
     try {
       const room = gameRooms.get(roomCode);
@@ -603,12 +572,12 @@ io.on('connection', (socket) => {
     try {
       const room = gameRooms.get(roomCode);
       if (!room) return;
-      
+
       const winner = { id: socket.id, name: playerName };
-      if (!room.winners.some(w => w.id === winner.id)) { 
-        room.winners.push(winner); 
+      if (!room.winners.some(w => w.id === winner.id)) {
+        room.winners.push(winner);
       }
-      
+
       emitGameState(roomCode);
     } catch (error) {
       console.error('Error declaring winner:', error);
@@ -686,15 +655,14 @@ io.on('connection', (socket) => {
   socket.on('updateRoom', ({ roomCode, difficulty }) => {
     const room = gameRooms.get(roomCode);
     if (!room) return;
-  
+
     if (difficulty !== undefined) {
       room.config.difficulty = difficulty;
     }
-  
+
     emitGameState(roomCode);  // Ahora emite con difficulty incluida
   });
-  
-  // MODIFICADO: Nueva lógica de disconnect con persistencia para hosts
+
   socket.on('disconnect', () => {
     console.log('Cliente desconectado:', socket.id);
 
@@ -743,7 +711,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// MODIFICADO: Limpiar tanto salas activas como huérfanas y trackers
+// Limpieza automática
 setInterval(() => {
   const now = new Date();
 
@@ -813,6 +781,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 ╚════════════════════════════════════════════════════════╝
 
   Puerto: ${PORT}
+  Modo: Hito 1 (Refactorizado)
 
   🛡️  Configuración de Seguridad:
   ├─ Salas máximas: ${SECURITY_CONFIG.MAX_ROOMS}
@@ -823,6 +792,6 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   ├─ Limpieza automática: cada ${SECURITY_CONFIG.CLEANUP_INTERVAL / 1000}s
   └─ Tiempo de vida máximo: ${SECURITY_CONFIG.MAX_ROOM_LIFETIME / 60000} min
 
-  ✅ Servidor listo y protegido contra abuse!
+  ✅ Servidor listo!
   `);
 });
