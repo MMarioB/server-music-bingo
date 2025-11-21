@@ -16,15 +16,20 @@ class RoomManager {
     }
 
     /**
+     * NUEVO: Busca una sala huérfana.
+     */
+    getOrphanedRoom(roomCode) {
+        return this.orphanedRooms.get(roomCode);
+    }
+
+    /**
      * Crea una nueva sala y la guarda en memoria.
      */
     createRoom(hostId, config) {
-        // Generar código si no viene uno
         let roomCode = config.roomCode
             ? sanitizeString(config.roomCode, SECURITY_CONFIG.MAX_ROOM_CODE_LENGTH).toUpperCase()
             : Math.random().toString(36).substring(2, 7).toUpperCase();
 
-        // Evitar colisiones (simple check)
         if (this.rooms.has(roomCode) || this.orphanedRooms.has(roomCode)) {
             throw new Error('Código de sala ya existe o está reservado');
         }
@@ -32,7 +37,7 @@ class RoomManager {
         const hostPlayer = { id: hostId, name: 'Game Master', isHost: true, ready: true };
 
         const newRoom = {
-            roomCode, // Guardamos el código dentro del objeto también por comodidad
+            roomCode,
             hostId,
             players: [hostPlayer],
             config: config,
@@ -72,7 +77,6 @@ class RoomManager {
         const orphanedRoom = this.orphanedRooms.get(roomCode);
         if (!orphanedRoom) return null;
 
-        // Restaurar a activa
         const room = { ...orphanedRoom };
         delete room.orphanedAt;
         room.hostId = newHostId;
@@ -92,13 +96,12 @@ class RoomManager {
     }
 
     /**
-     * Métodos de limpieza (para el setInterval)
+     * Métodos de limpieza
      */
     cleanupStaleRooms() {
         const now = new Date();
         let cleaned = 0;
 
-        // Limpiar activas viejas
         for (const [code, room] of this.rooms.entries()) {
             if (now - room.createdAt > SECURITY_CONFIG.MAX_ROOM_LIFETIME) {
                 this.rooms.delete(code);
@@ -106,7 +109,6 @@ class RoomManager {
             }
         }
 
-        // Limpiar huérfanas expiradas
         for (const [code, room] of this.orphanedRooms.entries()) {
             if (now - room.orphanedAt > SECURITY_CONFIG.ORPHAN_TIMEOUT) {
                 this.orphanedRooms.delete(code);
@@ -124,5 +126,4 @@ class RoomManager {
     }
 }
 
-// Exportamos una única instancia (Singleton)
 export const roomManager = new RoomManager();
