@@ -5,10 +5,9 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 
-import { SECURITY_CONFIG, ALLOWED_ORIGINS } from './src/config/constants.js';
-import { sanitizeString, selectRandomTheme } from './src/utils/helpers.js';
-// NUEVO IMPORT
-import { roomManager } from './src/services/RoomManager.js';
+import { SECURITY_CONFIG, ALLOWED_ORIGINS } from '../src/config/constants.js';
+import { sanitizeString, selectRandomTheme } from '../src/utils/helpers.js';
+import { roomManager } from '../src/services/RoomManager.js';
 
 dotenv.config();
 
