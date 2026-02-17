@@ -49,6 +49,9 @@ class RoomManager {
             songPlaying: false,
             winners: [],
             gameOver: false,
+            currentControllerId: null,
+            currentControllerName: null,
+            controllerIndex: -1,
             createdAt: new Date(),
         };
 

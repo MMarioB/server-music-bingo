@@ -113,6 +113,20 @@ const checkConnectionRate = (ip) => {
   return true;
 };
 
+// Rotación automática de controlador
+const rotateController = (room) => {
+  const nonHostPlayers = room.players.filter(p => !p.isHost);
+  if (nonHostPlayers.length === 0) {
+    room.currentControllerId = null;
+    room.currentControllerName = null;
+    return;
+  }
+  room.controllerIndex = (room.controllerIndex + 1) % nonHostPlayers.length;
+  const next = nonHostPlayers[room.controllerIndex];
+  room.currentControllerId = next.id;
+  room.currentControllerName = next.name;
+};
+
 // Helper unificado para emitir estado
 const emitGameState = (roomCode) => {
   // AHORA USAMOS EL MANAGER
@@ -136,6 +150,8 @@ const emitGameState = (roomCode) => {
     difficulty: room.config?.difficulty || 'principiante',
     musicThemes: room.config?.musicThemes || [],
     currentTheme: room.currentTheme || null,
+    currentControllerId: room.currentControllerId,
+    currentControllerName: room.currentControllerName,
   };
 
   io.to(roomCode).emit('gameStateUpdate', gameState);
@@ -308,6 +324,7 @@ io.on('connection', (socket) => {
 
       room.phase = 'wheel';
       if (difficulty) room.config.difficulty = difficulty;
+      rotateController(room);
       emitGameState(roomCode);
     } catch (error) { console.error(error); }
   });
@@ -478,6 +495,7 @@ io.on('connection', (socket) => {
         p.isCorrect = false;
         p.ready = p.isHost;
       });
+      rotateController(room);
       if (callback) callback({ success: true });
       emitGameState(roomCode);
     } catch (error) { if (callback) callback({ error: error.message }); }
@@ -488,6 +506,38 @@ io.on('connection', (socket) => {
     if (!room) return;
     if (difficulty !== undefined) room.config.difficulty = difficulty;
     emitGameState(roomCode);
+  });
+
+  socket.on('setController', ({ roomCode, controllerId, controllerName }, callback) => {
+    try {
+      const room = roomManager.getRoom(roomCode);
+      if (!room || room.hostId !== socket.id) {
+        if (callback) callback({ error: 'No autorizado' });
+        return;
+      }
+
+      room.currentControllerId = controllerId;
+      room.currentControllerName = controllerName;
+
+      if (callback) callback({ success: true });
+      emitGameState(roomCode);
+    } catch (error) {
+      console.error('Error setting controller:', error);
+      if (callback) callback({ error: error.message });
+    }
+  });
+
+  socket.on('controllerAction', ({ roomCode, action, payload }) => {
+    try {
+      const room = roomManager.getRoom(roomCode);
+      if (!room) return;
+
+      if (socket.id !== room.currentControllerId) return;
+
+      io.to(room.hostId).emit('controllerAction', { action, payload });
+    } catch (error) {
+      console.error('Error relaying controller action:', error);
+    }
   });
 
   socket.on('disconnect', () => {
@@ -522,6 +572,10 @@ io.on('connection', (socket) => {
       // Jugadores regulares
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
       if (playerIndex > -1) {
+        if (room.currentControllerId === socket.id) {
+          room.currentControllerId = null;
+          room.currentControllerName = null;
+        }
         room.players.splice(playerIndex, 1);
         emitGameState(roomCode);
         console.log(`Jugador ${socket.id} eliminado de la sala ${roomCode}.`);
