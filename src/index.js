@@ -8,6 +8,7 @@ import rateLimit from 'express-rate-limit';
 import { SECURITY_CONFIG, ALLOWED_ORIGINS } from '../src/config/constants.js';
 import { sanitizeString, selectRandomTheme } from '../src/utils/helpers.js';
 import { roomManager } from '../src/services/RoomManager.js';
+import { tracksHandler } from '../src/services/TrackCatalog.js';
 
 dotenv.config();
 
@@ -599,6 +600,10 @@ setInterval(() => {
   const stats = roomManager.getStats();
   console.log(`📊 [STATUS] Salas activas: ${stats.active}, Huérfanas: ${stats.orphaned}, Cleaned: ${cleaned}`);
 }, SECURITY_CONFIG.CLEANUP_INTERVAL);
+
+// Catálogo de previews (iTunes/Deezer): el frontend pide las canciones de
+// un artista y recibe MP3s de 30s reproducibles sin Spotify
+app.get('/api/tracks', tracksHandler);
 
 app.get('/health', (req, res) => {
   const stats = roomManager.getStats();
